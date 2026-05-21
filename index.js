@@ -16,12 +16,8 @@ const {
   Routes,
   SlashCommandBuilder,
   ChannelType,
-  AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
-const { createCanvas, loadImage, registerFont } = require('canvas');
-const https = require('https');
-const path = require('path');
 
 // ── CONFIG ─────────────────────────────────────────────────
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -111,106 +107,6 @@ async function updateNickname(guild, userId) {
       await member.setNickname(newNick).catch(() => {});
     }
   } catch {}
-}
-
-// ── DOWNLOAD IMAGE ─────────────────────────────────────────
-function downloadImage(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, { timeout: 5000 }, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// ── GENERATE LEADERBOARD IMAGE ─────────────────────────────
-async function generateLeaderboardImage() {
-  const pts = loadPoints();
-  const sorted = Object.entries(pts)
-    .filter(([, v]) => v.pts > 0)
-    .sort((a, b) => b[1].pts - a[1].pts)
-    .slice(0, 10);
-
-  const width = 1200;
-  const height = 100 + sorted.length * 100;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
-
-  // Background gradient
-  const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  gradient.addColorStop(0, '#1a1a2e');
-  gradient.addColorStop(1, '#16213e');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
-
-  // Title
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 48px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('🏆 LEADERBOARD 🏆', width / 2, 60);
-
-  // Headers
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 24px Arial';
-  ctx.textAlign = 'left';
-  ctx.fillText('RANK', 20, 110);
-  ctx.fillText('PLAYER', 120, 110);
-  ctx.fillText('W/L', 700, 110);
-  ctx.fillText('MVP', 850, 110);
-  ctx.fillText('POINTS', 950, 110);
-
-  // Separator line
-  ctx.strokeStyle = '#ffd700';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(20, 130);
-  ctx.lineTo(width - 20, 130);
-  ctx.stroke();
-
-  // Rows
-  let yPos = 160;
-  const medals = ['🥇', '🥈', '🥉'];
-
-  for (let i = 0; i < sorted.length; i++) {
-    const [userId, data] = sorted[i];
-    const rank = i + 1;
-    const medal = medals[i] || `#${rank}`;
-
-    // Row background (alternating)
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 215, 0, 0.05)';
-    ctx.fillRect(20, yPos - 35, width - 40, 85);
-
-    // Rank
-    ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 28px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(medal, 30, yPos);
-
-    // Player name
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 22px Arial';
-    ctx.fillText(data.username.substring(0, 25), 120, yPos);
-
-    // W/L
-    ctx.fillStyle = '#87ceeb';
-    ctx.font = '20px Arial';
-    ctx.fillText(`${data.wins}W/${data.losses}L`, 700, yPos);
-
-    // MVP
-    ctx.fillStyle = '#ff69b4';
-    ctx.fillText(String(data.mvps), 850, yPos);
-
-    // Points
-    ctx.fillStyle = '#00ff00';
-    ctx.font = 'bold 24px Arial';
-    ctx.fillText(String(data.pts), 950, yPos);
-
-    yPos += 100;
-  }
-
-  return canvas.createPNGStream();
 }
 
 // ── POINTS SYSTEM ──────────────────────────────────────────
@@ -322,7 +218,7 @@ const commands = [
     .addStringOption(o => o.setName('roomid').setDescription('Room ID of the match').setRequired(true)),
   new SlashCommandBuilder()
     .setName('leaderboard')
-    .setDescription('Show the top 10 players as image'),
+    .setDescription('Show the top 10 players'),
   new SlashCommandBuilder()
     .setName('rank')
     .setDescription('Check your rank and points'),
@@ -461,25 +357,41 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Match \`${roomId}\` cancelled and players moved back.`, ephemeral: true });
     }
 
-    // /leaderboard (TOP 10 as IMAGE)
+    // /leaderboard (TOP 10 as EMBED)
     if (interaction.isChatInputCommand() && interaction.commandName === 'leaderboard') {
       await interaction.deferReply();
       
-      try {
-        const stream = await generateLeaderboardImage();
-        const buffer = await new Promise((resolve, reject) => {
-          const chunks = [];
-          stream.on('data', chunk => chunks.push(chunk));
-          stream.on('end', () => resolve(Buffer.concat(chunks)));
-          stream.on('error', reject);
-        });
+      const pts = loadPoints();
+      const sorted = Object.entries(pts)
+        .filter(([, v]) => v.pts > 0)
+        .sort((a, b) => b[1].pts - a[1].pts)
+        .slice(0, 10);
 
-        const attachment = new AttachmentBuilder(buffer, { name: 'leaderboard.png' });
-        return interaction.editReply({ files: [attachment] });
-      } catch (err) {
-        console.error('❌ Leaderboard image error:', err);
-        return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
+      if (sorted.length === 0) {
+        return interaction.editReply({ content: '📊 No points recorded yet!' });
       }
+
+      const medals = ['🥇', '🥈', '🥉'];
+      let leaderboardText = '```\nRANK  PLAYER                W/L      MVP   PTS\n';
+      leaderboardText += '════════════════════════════════════════════════\n';
+      
+      sorted.forEach(([, v], i) => {
+        const medal = medals[i] || `#${i + 1}`;
+        const paddedMedal = medal.padEnd(4);
+        const paddedName = v.username.substring(0, 18).padEnd(19);
+        const paddedWL = `${v.wins}W/${v.losses}L`.padEnd(9);
+        const paddedMvp = String(v.mvps).padEnd(5);
+        leaderboardText += `${paddedMedal}${paddedName}${paddedWL}${paddedMvp}${v.pts}\n`;
+      });
+      leaderboardText += '```';
+
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 LEADERBOARD - TOP 10')
+        .setDescription(leaderboardText)
+        .setColor(0xffd700)
+        .setFooter({ text: `Last updated • ${new Date().toLocaleString()}` });
+
+      return interaction.editReply({ embeds: [embed] });
     }
 
     // /rank
@@ -585,7 +497,6 @@ client.on('interactionCreate', async (interaction) => {
         if (!game) return interaction.reply({ content: '❌ Lobby expired!', ephemeral: true });
         if (game.status !== 'lobby') return interaction.reply({ content: '❌ Match already started!', ephemeral: true });
 
-        // CHECK IF IN WAITING VC
         const inWaiting = await isInWaiting(interaction.guild, interaction.user.id);
         if (!inWaiting) {
           return interaction.reply({
