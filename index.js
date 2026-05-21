@@ -30,6 +30,7 @@ const POINTS_FILE = './points.json';
 
 const ADMIN_ROLES = ['OWNERSHIP', '/C', '/Agent', '/Q', 'Server Developer', 'System Bots', 'Bots', '/EspControl'];
 const WAITING_VC_NAME = '⌛・Waiting';
+const PLAY_CHANNEL_ID  = '1500952513980141711';
 
 if (!TOKEN || !CLIENT_ID) {
   console.error('❌ Missing DISCORD_TOKEN or CLIENT_ID in .env');
@@ -469,6 +470,9 @@ const commands = [
   new SlashCommandBuilder()
     .setName('rank')
     .setDescription('Check your rank and points'),
+  new SlashCommandBuilder()
+    .setName('resetvote')
+    .setDescription('Start a public vote to reset all player points (admin only)'),
 ].map(c => c.toJSON());
 
 // ── READY ──────────────────────────────────────────────────
@@ -528,6 +532,12 @@ client.on('interactionCreate', async (interaction) => {
 
     // /play
     if (interaction.isChatInputCommand() && interaction.commandName === 'play') {
+      if (interaction.channelId !== PLAY_CHANNEL_ID) {
+        return interaction.reply({
+          content: `❌ You can only use **/play** in <#${PLAY_CHANNEL_ID}>!`,
+          ephemeral: true,
+        });
+      }
       const inWaiting = await isInWaiting(interaction.guild, interaction.user.id);
       if (!inWaiting) {
         return interaction.reply({
@@ -658,6 +668,87 @@ client.on('interactionCreate', async (interaction) => {
         console.error('❌ Leaderboard error:', err);
         return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
       }
+    }
+
+    // /resetvote (admin only)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'resetvote') {
+      if (!isAdmin(interaction.member)) {
+        return interaction.reply({ content: '❌ You do not have permission to start a reset vote!', ephemeral: true });
+      }
+
+      const votes = { yes: new Set(), no: new Set() };
+      const DURATION = 60; // seconds
+
+      const buildEmbed = (remaining) => new EmbedBuilder()
+        .setTitle('🗳️  POINTS RESET VOTE')
+        .setDescription(
+          '**An admin has called a vote to reset all player points.**\n\n' +
+          '✅  **Yes** — wipe all points and start fresh\n' +
+          '❌  **No**  — keep the current leaderboard\n\n' +
+          '```' +
+          '  YES  ' + votes.yes.size + '  |  NO  ' + votes.no.size +
+          '```'
+        )
+        .setColor(0x5865F2)
+        .setFooter({ text: 'Vote closes in ' + remaining + 's  •  Each player votes once' });
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rv_yes').setLabel('✅  YES — Reset').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId('rv_no').setLabel('❌  NO — Keep').setStyle(ButtonStyle.Danger)
+      );
+
+      await interaction.reply({ embeds: [buildEmbed(DURATION)], components: [row] });
+      const msg = await interaction.fetchReply();
+
+      let remaining = DURATION;
+      const ticker = setInterval(async () => {
+        remaining -= 10;
+        if (remaining > 0) {
+          await msg.edit({ embeds: [buildEmbed(remaining)], components: [row] }).catch(() => {});
+        }
+      }, 10000);
+
+      const collector = msg.createMessageComponentCollector({ time: DURATION * 1000 });
+
+      collector.on('collect', async (btn) => {
+        const uid = btn.user.id;
+        if (btn.customId === 'rv_yes') { votes.no.delete(uid); votes.yes.add(uid); }
+        else                           { votes.yes.delete(uid); votes.no.add(uid); }
+        await btn.reply({ content: btn.customId === 'rv_yes' ? '✅ Voted **YES**' : '❌ Voted **NO**', ephemeral: true });
+        await msg.edit({ embeds: [buildEmbed(remaining)], components: [row] }).catch(() => {});
+      });
+
+      collector.on('end', async () => {
+        clearInterval(ticker);
+        const yesCount = votes.yes.size;
+        const noCount  = votes.no.size;
+        const didReset = yesCount > noCount && yesCount >= 1;
+
+        if (didReset) {
+          savePoints({});
+          const resultEmbed = new EmbedBuilder()
+            .setTitle('🔄  LEADERBOARD RESET')
+            .setDescription(
+              '**The vote passed — all points have been wiped!**\n\n' +
+              '```  YES  ' + yesCount + '  |  NO  ' + noCount + '```\n' +
+              'The leaderboard is now empty. Play matches to climb back up!'
+            )
+            .setColor(0xed4245)
+            .setTimestamp();
+          await msg.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+        } else {
+          const resultEmbed = new EmbedBuilder()
+            .setTitle('🛡️  RESET REJECTED')
+            .setDescription(
+              '**The vote failed — leaderboard stays as-is.**\n\n' +
+              '```  YES  ' + yesCount + '  |  NO  ' + noCount + '```'
+            )
+            .setColor(0x57f287)
+            .setTimestamp();
+          await msg.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+        }
+      });
+      return;
     }
 
     // /rank
