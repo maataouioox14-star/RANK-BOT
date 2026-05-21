@@ -16,8 +16,12 @@ const {
   Routes,
   SlashCommandBuilder,
   ChannelType,
+  AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
+const { createCanvas, loadImage, registerFont } = require('canvas');
+const https = require('https');
+const path = require('path');
 
 // ── CONFIG ─────────────────────────────────────────────────
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -43,8 +47,8 @@ const client = new Client({
   ],
 });
 
-const games = new Map(); // gameId → game
-const botMoving = new Set(); // userIds being moved by bot (skip timeout)
+const games = new Map();
+const botMoving = new Set();
 
 // ── HELPERS ────────────────────────────────────────────────
 function genId() {
@@ -80,21 +84,18 @@ function isAdmin(member) {
   );
 }
 
-// Check if user is in any VC named exactly WAITING_VC_NAME
 async function isInWaiting(guild, userId) {
   const member = await guild.members.fetch({ user: userId, force: true }).catch(() => null);
   if (!member?.voice?.channel) return false;
   return member.voice.channel.name === WAITING_VC_NAME;
 }
 
-// Get first waiting VC in guild
 function getWaitingVC(guild) {
   return guild.channels.cache.find(
     c => c.type === ChannelType.GuildVoice && c.name === WAITING_VC_NAME
   ) || null;
 }
 
-// Update a member's nickname to show rank (skip admins + owner)
 async function updateNickname(guild, userId) {
   try {
     const member = await guild.members.fetch(userId).catch(() => null);
@@ -112,30 +113,126 @@ async function updateNickname(guild, userId) {
   } catch {}
 }
 
-// Refresh all ranked members' nicknames
-async function refreshAllNicknames(guild) {
-  const pts = loadPoints();
-  for (const userId of Object.keys(pts)) {
-    await updateNickname(guild, userId);
-  }
+// ── DOWNLOAD IMAGE ─────────────────────────────────────────
+function downloadImage(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, { timeout: 5000 }, res => {
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve(Buffer.concat(chunks)));
+      res.on('error', reject);
+    }).on('error', reject);
+  });
 }
 
-// ── POINTS ─────────────────────────────────────────────────
-// MVP Win:  MVP +100pts (50 bonus + 50 win), Teammates +50pts each
-// MVP Lose: MVP +50pts  (30 bonus + 20 loss), Teammates +20pts each
+// ── GENERATE LEADERBOARD IMAGE ─────────────────────────────
+async function generateLeaderboardImage() {
+  const pts = loadPoints();
+  const sorted = Object.entries(pts)
+    .filter(([, v]) => v.pts > 0)
+    .sort((a, b) => b[1].pts - a[1].pts)
+    .slice(0, 10);
+
+  const width = 1200;
+  const height = 100 + sorted.length * 100;
+  const canvas = createCanvas(width, height);
+  const ctx = canvas.getContext('2d');
+
+  // Background gradient
+  const gradient = ctx.createLinearGradient(0, 0, 0, height);
+  gradient.addColorStop(0, '#1a1a2e');
+  gradient.addColorStop(1, '#16213e');
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, width, height);
+
+  // Title
+  ctx.fillStyle = '#ffd700';
+  ctx.font = 'bold 48px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('🏆 LEADERBOARD 🏆', width / 2, 60);
+
+  // Headers
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 24px Arial';
+  ctx.textAlign = 'left';
+  ctx.fillText('RANK', 20, 110);
+  ctx.fillText('PLAYER', 120, 110);
+  ctx.fillText('W/L', 700, 110);
+  ctx.fillText('MVP', 850, 110);
+  ctx.fillText('POINTS', 950, 110);
+
+  // Separator line
+  ctx.strokeStyle = '#ffd700';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(20, 130);
+  ctx.lineTo(width - 20, 130);
+  ctx.stroke();
+
+  // Rows
+  let yPos = 160;
+  const medals = ['🥇', '🥈', '🥉'];
+
+  for (let i = 0; i < sorted.length; i++) {
+    const [userId, data] = sorted[i];
+    const rank = i + 1;
+    const medal = medals[i] || `#${rank}`;
+
+    // Row background (alternating)
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 215, 0, 0.05)';
+    ctx.fillRect(20, yPos - 35, width - 40, 85);
+
+    // Rank
+    ctx.fillStyle = '#ffd700';
+    ctx.font = 'bold 28px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(medal, 30, yPos);
+
+    // Player name
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 22px Arial';
+    ctx.fillText(data.username.substring(0, 25), 120, yPos);
+
+    // W/L
+    ctx.fillStyle = '#87ceeb';
+    ctx.font = '20px Arial';
+    ctx.fillText(`${data.wins}W/${data.losses}L`, 700, yPos);
+
+    // MVP
+    ctx.fillStyle = '#ff69b4';
+    ctx.fillText(String(data.mvps), 850, yPos);
+
+    // Points
+    ctx.fillStyle = '#00ff00';
+    ctx.font = 'bold 24px Arial';
+    ctx.fillText(String(data.pts), 950, yPos);
+
+    yPos += 100;
+  }
+
+  return canvas.createPNGStream();
+}
+
+// ── POINTS SYSTEM ──────────────────────────────────────────
 async function awardPoints(guild, target, result, channel, game = null) {
   const pts = loadPoints();
-  if (!pts[target.id]) pts[target.id] = { username: target.username, pts: 0 };
+  if (!pts[target.id]) pts[target.id] = { username: target.username, pts: 0, wins: 0, losses: 0, mvps: 0, matches: 0 };
 
   if (result === 'win') {
     pts[target.id].pts += 100;
+    pts[target.id].mvps += 1;
+    pts[target.id].wins += 1;
+    pts[target.id].matches += 1;
     pts[target.id].username = target.username;
+    
     if (game) {
       const team = game.team1.some(u => u.id === target.id) ? game.team1 : game.team2;
       for (const u of team) {
         if (u.id === target.id) continue;
-        if (!pts[u.id]) pts[u.id] = { username: u.username, pts: 0 };
+        if (!pts[u.id]) pts[u.id] = { username: u.username, pts: 0, wins: 0, losses: 0, mvps: 0, matches: 0 };
         pts[u.id].pts += 50;
+        pts[u.id].wins += 1;
+        pts[u.id].matches += 1;
         pts[u.id].username = u.username;
       }
     }
@@ -152,19 +249,24 @@ async function awardPoints(guild, target, result, channel, game = null) {
               `👥 Teammates: **+50 pts** each`
             )
             .setColor(0xffd700)
-            .setFooter({ text: '50 bonus + 50 win = 100' })
         ]
       }).catch(() => {});
     }
   } else {
     pts[target.id].pts += 50;
+    pts[target.id].mvps += 1;
+    pts[target.id].losses += 1;
+    pts[target.id].matches += 1;
     pts[target.id].username = target.username;
+    
     if (game) {
       const team = game.team1.some(u => u.id === target.id) ? game.team1 : game.team2;
       for (const u of team) {
         if (u.id === target.id) continue;
-        if (!pts[u.id]) pts[u.id] = { username: u.username, pts: 0 };
+        if (!pts[u.id]) pts[u.id] = { username: u.username, pts: 0, wins: 0, losses: 0, mvps: 0, matches: 0 };
         pts[u.id].pts += 20;
+        pts[u.id].losses += 1;
+        pts[u.id].matches += 1;
         pts[u.id].username = u.username;
       }
     }
@@ -181,13 +283,11 @@ async function awardPoints(guild, target, result, channel, game = null) {
               `👥 Teammates: **+20 pts** each`
             )
             .setColor(0x99aab5)
-            .setFooter({ text: '30 bonus + 20 loss = 50' })
         ]
       }).catch(() => {});
     }
   }
 
-  // Update nicknames after points change
   if (guild) {
     const allUsers = game ? [...game.team1, ...game.team2] : [target];
     for (const u of allUsers) await updateNickname(guild, u.id);
@@ -202,7 +302,6 @@ const commands = [
     .addStringOption(o =>
       o.setName('mode').setDescription('Match mode').setRequired(true)
         .addChoices(
-          { name: '1v1', value: '1v1' },
           { name: '2v2', value: '2v2' },
           { name: '3v3', value: '3v3' },
           { name: '4v4', value: '4v4' },
@@ -223,7 +322,7 @@ const commands = [
     .addStringOption(o => o.setName('roomid').setDescription('Room ID of the match').setRequired(true)),
   new SlashCommandBuilder()
     .setName('leaderboard')
-    .setDescription('Show the top 10 players'),
+    .setDescription('Show the top 10 players as image'),
   new SlashCommandBuilder()
     .setName('rank')
     .setDescription('Check your rank and points'),
@@ -241,16 +340,14 @@ client.on('ready', async () => {
   }
 });
 
-// ── VOICE STATE — warn players who leave team VC ───────────
+// ── VOICE STATE UPDATE ─────────────────────────────────────
 client.on('voiceStateUpdate', async (oldState, newState) => {
   try {
     const guild = oldState.guild;
     const userId = oldState.id;
 
-    // Skip if bot is the one moving this player
     if (botMoving.has(userId)) return;
 
-    // Find if this user is in an active match
     let playerGame = null;
     for (const [, g] of games) {
       if (g.status !== 'started') continue;
@@ -264,20 +361,15 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
     const expectedVC = playerGame.team1.some(u => u.id === userId) ? playerGame.vc1 : playerGame.vc2;
     if (!expectedVC) return;
 
-    // Only trigger if they LEFT their team VC (not joined it)
     if (oldState.channelId === expectedVC.id && newState.channelId !== expectedVC.id) {
       const member = await guild.members.fetch(userId).catch(() => null);
       if (!member) return;
 
-      // Apply 15 minute timeout using communicationDisabledUntil
       const until = new Date(Date.now() + 15 * 60 * 1000);
       await member.disableCommunicationUntil(until, 'Left team voice channel during active match').catch(() => {});
 
       await member.user.send(
-        `⚠️ **Warning!**\n\n` +
-        `You left your team voice channel during an active match.\n` +
-        `You have been **timed out for 15 minutes**.\n\n` +
-        `Match Room ID: \`${playerGame.roomID}\``
+        `⚠️ **Warning!**\n\nYou left your team voice channel during an active match.\nYou have been **timed out for 15 minutes**.`
       ).catch(() => {});
 
       console.log(`⚠️ Timed out ${member.user.username} for leaving team VC`);
@@ -291,7 +383,7 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 client.on('interactionCreate', async (interaction) => {
   try {
 
-    // ── /play ────────────────────────────────────────────
+    // /play
     if (interaction.isChatInputCommand() && interaction.commandName === 'play') {
       const inWaiting = await isInWaiting(interaction.guild, interaction.user.id);
       if (!inWaiting) {
@@ -304,8 +396,6 @@ client.on('interactionCreate', async (interaction) => {
       const mode = interaction.options.getString('mode');
       const gameId = genId();
 
-      // Store mode + gameId temporarily before modal
-      // We open the modal immediately — all info in one popup
       const modal = new ModalBuilder()
         .setCustomId(`playmodal_${mode}_${gameId}`)
         .setTitle(`🎮 Free Fire ${mode} — Match Setup`);
@@ -325,7 +415,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.showModal(modal);
     }
 
-    // ── /set (admin only) ────────────────────────────────
+    // /set (admin only)
     if (interaction.isChatInputCommand() && interaction.commandName === 'set') {
       if (!isAdmin(interaction.member)) {
         return interaction.reply({ content: '❌ You do not have permission!', ephemeral: true });
@@ -351,7 +441,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Points awarded to **${target.username}**!`, ephemeral: true });
     }
 
-    // ── /cancelmatch (admin only) ────────────────────────
+    // /cancelmatch (admin only)
     if (interaction.isChatInputCommand() && interaction.commandName === 'cancelmatch') {
       if (!isAdmin(interaction.member)) {
         return interaction.reply({ content: '❌ You do not have permission!', ephemeral: true });
@@ -371,60 +461,59 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Match \`${roomId}\` cancelled and players moved back.`, ephemeral: true });
     }
 
-    // ── /leaderboard ─────────────────────────────────────
+    // /leaderboard (TOP 10 as IMAGE)
     if (interaction.isChatInputCommand() && interaction.commandName === 'leaderboard') {
-      const pts = loadPoints();
-      const sorted = Object.entries(pts)
-        .filter(([, v]) => v.pts > 0)
-        .sort((a, b) => b[1].pts - a[1].pts)
-        .slice(0, 10);
+      await interaction.deferReply();
+      
+      try {
+        const stream = await generateLeaderboardImage();
+        const buffer = await new Promise((resolve, reject) => {
+          const chunks = [];
+          stream.on('data', chunk => chunks.push(chunk));
+          stream.on('end', () => resolve(Buffer.concat(chunks)));
+          stream.on('error', reject);
+        });
 
-      if (sorted.length === 0) {
-        return interaction.reply({ content: '📊 No points recorded yet!', ephemeral: true });
+        const attachment = new AttachmentBuilder(buffer, { name: 'leaderboard.png' });
+        return interaction.editReply({ files: [attachment] });
+      } catch (err) {
+        console.error('❌ Leaderboard image error:', err);
+        return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
       }
-
-      const medals = ['🥇', '🥈', '🥉'];
-      const bar = (pts, max) => {
-        const filled = Math.round((pts / max) * 10);
-        return '█'.repeat(filled) + '░'.repeat(10 - filled);
-      };
-      const max = sorted[0][1].pts;
-
-      const rows = sorted.map(([, v], i) =>
-        `${medals[i] || `\`${String(i + 1).padStart(2, '0')}.\``} **${v.username}**\n` +
-        `┗ ${bar(v.pts, max)} **${v.pts} pts**`
-      ).join('\n\n');
-
-      const embed = new EmbedBuilder()
-        .setTitle('🏆  E S P O R T S  L E A D E R B O A R D')
-        .setDescription(rows)
-        .setColor(0xffd700)
-        .setFooter({ text: `Top ${sorted.length} players • Updated now` })
-        .setTimestamp();
-
-      return interaction.reply({ embeds: [embed] });
     }
 
-    // ── /rank ────────────────────────────────────────────
+    // /rank
     if (interaction.isChatInputCommand() && interaction.commandName === 'rank') {
       const pts = loadPoints();
       const data = pts[interaction.user.id];
       const rank = getRank(interaction.user.id);
 
+      const points = data?.pts || 0;
+      const wins = data?.wins || 0;
+      const losses = data?.losses || 0;
+      const mvps = data?.mvps || 0;
+      const matches = data?.matches || 0;
+      const winRate = matches > 0 ? ((wins / matches) * 100).toFixed(1) : 0;
+
       const embed = new EmbedBuilder()
-        .setTitle('📊 Player Stats')
-        .setDescription(
-          `**${interaction.user.username}**\n\n` +
-          `🏅 **Rank:** ${rank ? `#${rank}` : 'Unranked'}\n` +
-          `⭐ **Points:** ${data?.pts || 0} pts`
+        .setTitle(`📊 ${interaction.user.username}'s Stats`)
+        .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
+        .addFields(
+          { name: '💯 POINTS', value: `${points}`, inline: true },
+          { name: '✅ WINS', value: `${wins}`, inline: true },
+          { name: '❌ LOSSES', value: `${losses}`, inline: true },
+          { name: '👑 MVPs', value: `${mvps}`, inline: true },
+          { name: '🎮 MATCHES', value: `${matches}`, inline: true },
+          { name: '📈 WIN RATE', value: `${winRate}%`, inline: true },
         )
         .setColor(rank ? 0x5865f2 : 0x99aab5)
-        .setThumbnail(interaction.user.displayAvatarURL());
+        .setFooter({ text: rank ? `🏅 Rank #${rank}` : '🔓 Unranked' })
+        .setTimestamp();
 
       return interaction.reply({ embeds: [embed], ephemeral: true });
     }
 
-    // ── MODAL: play setup ────────────────────────────────
+    // Modal: play setup
     if (interaction.isModalSubmit() && interaction.customId.startsWith('playmodal_')) {
       const parts = interaction.customId.split('_');
       const mode = parts[1];
@@ -466,7 +555,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: '✅ Lobby created!', ephemeral: true });
     }
 
-    // ── MODAL: join key ──────────────────────────────────
+    // Modal: join key
     if (interaction.isModalSubmit() && interaction.customId.startsWith('keymodal_')) {
       const parts = interaction.customId.split('_');
       const gameId = parts[1];
@@ -483,7 +572,7 @@ client.on('interactionCreate', async (interaction) => {
       return addToTeam(interaction, game, teamNum, true);
     }
 
-    // ── BUTTONS ──────────────────────────────────────────
+    // BUTTONS
     if (interaction.isButton()) {
       const { customId } = interaction;
 
@@ -496,7 +585,7 @@ client.on('interactionCreate', async (interaction) => {
         if (!game) return interaction.reply({ content: '❌ Lobby expired!', ephemeral: true });
         if (game.status !== 'lobby') return interaction.reply({ content: '❌ Match already started!', ephemeral: true });
 
-        // Must be in waiting VC
+        // CHECK IF IN WAITING VC
         const inWaiting = await isInWaiting(interaction.guild, interaction.user.id);
         if (!inWaiting) {
           return interaction.reply({
@@ -505,13 +594,11 @@ client.on('interactionCreate', async (interaction) => {
           });
         }
 
-        // Already in game?
         const allPlayers = [...game.team1, ...game.team2];
         if (allPlayers.some(u => u.id === interaction.user.id)) {
           return interaction.reply({ content: '❌ You are already in this lobby!', ephemeral: true });
         }
 
-        // Key protected?
         if (game.joinKey && interaction.user.id !== game.host.id) {
           const modal = new ModalBuilder()
             .setCustomId(`keymodal_${gameId}_${teamNum}`)
@@ -553,7 +640,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.deferUpdate();
       }
 
-      // Start (host only, teams must be full)
+      // Start (host only)
       if (customId === 'start') {
         const gameId = [...games.keys()].find(id => games.get(id).messageId === interaction.message.id);
         const game = games.get(gameId);
@@ -579,23 +666,19 @@ client.on('interactionCreate', async (interaction) => {
         return postVotes(game);
       }
 
-      // MVP Vote dropdowns
+      // MVP Vote
       if (customId.startsWith('mvpwin_') || customId.startsWith('mvplose_')) {
         const parts = customId.split('_');
-        const voteType = parts[1]; // win or lose
+        const voteType = parts[1];
         const gameId = parts[2];
         const game = games.get(gameId);
 
         if (!game) return interaction.reply({ content: '❌ Match expired!', ephemeral: true });
 
-        // Allowed voters: host + first of team2 + admins
-        const canVote = [game.host.id, game.team2[0]?.id].filter(Boolean);
-        const voterIsAdmin = isAdmin(interaction.member);
-        if (!canVote.includes(interaction.user.id) && !voterIsAdmin) {
-          return interaction.reply({ content: '❌ Only the **host**, **first player of Team 2**, or an **admin** can vote!', ephemeral: true });
+        if (interaction.user.id !== game.host.id) {
+          return interaction.reply({ content: '❌ Only the **host** can vote! (Admins use `/set` command)', ephemeral: true });
         }
 
-        const selectedId = interaction.values[0];
         if (!game.votes[interaction.user.id]) game.votes[interaction.user.id] = { win: null, lose: null };
 
         if (voteType === 'win' && game.votes[interaction.user.id].win) {
@@ -605,44 +688,27 @@ client.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: '❌ You already selected MVP Loser!', ephemeral: true });
         }
 
-        game.votes[interaction.user.id][voteType] = selectedId;
-
-        if (game.votes[interaction.user.id].win && game.votes[interaction.user.id].lose) {
-          game.playerVoted.add(interaction.user.id);
-        }
-
-        const winCount = Object.values(game.votes).filter(v => v.win).length;
-        const loseCount = Object.values(game.votes).filter(v => v.lose).length;
-
         await interaction.reply({
-          content: `✅ Vote recorded!\n👑 Win votes: **${winCount}** | 💀 Lose votes: **${loseCount}**`,
+          content: `✅ Vote recorded for **${voteType === 'win' ? '👑 MVP Winner' : '💀 MVP Loser'}**!`,
           ephemeral: true,
         });
-
-        // Tally when all 3 eligible voters have voted for both
-        if (game.playerVoted.size >= 3 || game.playerVoted.size >= canVote.length) {
-          await tallyVotes(game, interaction.guild);
-        }
       }
     }
 
-    // ── SELECT MENU interactions ──────────────────────────
+    // SELECT MENU
     if (interaction.isStringSelectMenu()) {
       const { customId } = interaction;
 
       if (customId.startsWith('vote_win_') || customId.startsWith('vote_lose_')) {
         const parts = customId.split('_');
-        const voteType = parts[1]; // win or lose
+        const voteType = parts[1];
         const gameId = parts[2];
         const game = games.get(gameId);
 
         if (!game) return interaction.reply({ content: '❌ Match expired!', ephemeral: true });
 
-        // Allowed voters: host + first of team2 + admins
-        const canVote = [game.host.id, game.team2[0]?.id].filter(Boolean);
-        const voterIsAdmin = isAdmin(interaction.member);
-        if (!canVote.includes(interaction.user.id) && !voterIsAdmin) {
-          return interaction.reply({ content: '❌ Only the **host**, **first player of Team 2**, or an **admin** can vote!', ephemeral: true });
+        if (interaction.user.id !== game.host.id) {
+          return interaction.reply({ content: '❌ Only the **host** can vote!', ephemeral: true });
         }
 
         const selectedId = interaction.values[0];
@@ -662,23 +728,15 @@ client.on('interactionCreate', async (interaction) => {
 
         if (game.votes[interaction.user.id].win && game.votes[interaction.user.id].lose) {
           game.playerVoted.add(interaction.user.id);
+          await tallyVotes(game, interaction.guild);
         }
-
-        const winCount = Object.values(game.votes).filter(v => v.win).length;
-        const loseCount = Object.values(game.votes).filter(v => v.lose).length;
 
         await interaction.reply({
           content:
             `✅ Voted! You selected **${selectedPlayer?.username || 'Unknown'}** as ` +
-            `${voteType === 'win' ? '👑 MVP Winner' : '💀 MVP Loser'}\n` +
-            `Win votes: **${winCount}** | Lose votes: **${loseCount}**`,
+            `${voteType === 'win' ? '👑 MVP Winner' : '💀 MVP Loser'}`,
           ephemeral: true,
         });
-
-        // Tally once enough people voted
-        if (game.playerVoted.size >= Math.min(3, canVote.length)) {
-          await tallyVotes(game, interaction.guild);
-        }
       }
     }
 
@@ -718,17 +776,14 @@ async function startMatch(game, guild, lobbyMessage) {
     const allPlayers = [...game.team1, ...game.team2];
     const adminRole = guild.roles.cache.find(r => r.name === '/EspControl');
 
-    // Create category
     const category = await guild.channels.create({
       name: `Match • ${game.roomID}`,
       type: ChannelType.GuildCategory,
     });
 
-    // Team voice channels
     const vc1 = await guild.channels.create({ name: '🔴 Team 1', type: ChannelType.GuildVoice, parent: category.id });
     const vc2 = await guild.channels.create({ name: '🟢 Team 2', type: ChannelType.GuildVoice, parent: category.id });
 
-    // Private vote channel — only players + admins
     const perms = [
       { id: guild.roles.everyone, deny: [PermissionsBitField.Flags.ViewChannel] },
       ...allPlayers.map(u => ({
@@ -753,7 +808,6 @@ async function startMatch(game, guild, lobbyMessage) {
     game.vc2 = vc2;
     game.voteChannel = voteChannel;
 
-    // DM all players
     const dm =
       `🎮 **Match Starting!**\n\n` +
       `📋 Room ID: \`${game.roomID}\`\n` +
@@ -762,7 +816,6 @@ async function startMatch(game, guild, lobbyMessage) {
 
     for (const u of allPlayers) await u.send(dm).catch(() => {});
 
-    // Move to team VCs
     for (const u of game.team1) {
       botMoving.add(u.id);
       const m = await guild.members.fetch(u.id).catch(() => null);
@@ -776,7 +829,6 @@ async function startMatch(game, guild, lobbyMessage) {
       setTimeout(() => botMoving.delete(u.id), 3000);
     }
 
-    // Post End Match button in vote channel
     const matchEmbed = new EmbedBuilder()
       .setTitle('🎮 Match in Progress')
       .setDescription(
@@ -800,7 +852,6 @@ async function startMatch(game, guild, lobbyMessage) {
       ]
     });
 
-    // Delete lobby message
     await lobbyMessage.delete().catch(() => {});
 
     console.log(`✅ Match started: ${game.roomID}`);
@@ -809,14 +860,14 @@ async function startMatch(game, guild, lobbyMessage) {
   }
 }
 
-// ── POST VOTE DROPDOWNS ────────────────────────────────────
+// ── POST VOTE MENUS ────────────────────────────────────────
 async function postVotes(game) {
   const allPlayers = [...game.team1, ...game.team2];
 
   const embed = new EmbedBuilder()
     .setTitle('🗳️ MVP VOTE')
     .setDescription(
-      `**Voters:** Host + First player of Team 2 + Admins\n\n` +
+      `**Only Host votes**\n\n` +
       `🔴 **Team 1:** ${game.team1.map(u => u.username).join(', ')}\n` +
       `🟢 **Team 2:** ${game.team2.map(u => u.username).join(', ')}\n\n` +
       `Select **MVP Winner** 👑 and **MVP Loser** 💀 from the dropdowns below.`
