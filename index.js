@@ -15,11 +15,13 @@ const {
   REST,
   Routes,
   SlashCommandBuilder,
+  AttachmentBuilder,
   ChannelType,
 } = require('discord.js');
 const fs = require('fs');
 const https = require('https');
 const path = require('path');
+const { createCanvas, loadImage } = require('canvas');
 
 // ── CONFIG ─────────────────────────────────────────────────
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -111,114 +113,239 @@ async function updateNickname(guild, userId) {
   } catch {}
 }
 
-// ── GENERATE LEADERBOARD EMBEDS ────────────────────────────
-function generateLeaderboardEmbeds() {
-  const pts = loadPoints();
-  const sorted = Object.entries(pts)
-    .filter(([, v]) => v.pts > 0)
-    .sort((a, b) => b[1].pts - a[1].pts);
+// ── CANVAS HELPERS ─────────────────────────────────────────
+function rrect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
 
-  const embeds = [];
-  const itemsPerPage = 10;
-  const totalPages = Math.ceil(sorted.length / itemsPerPage);
-  const totalPlayers = sorted.length;
+function drawAvatarFallback(ctx, cx, cy, r, username) {
+  const palette = ['#5865F2','#57F287','#FEE75C','#EB459E','#ED4245','#00b0f4'];
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.fillStyle = palette[username.charCodeAt(0) % palette.length];
+  ctx.fill();
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold ' + Math.round(r * 0.9) + 'px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(username.charAt(0).toUpperCase(), cx, cy);
+  ctx.textBaseline = 'alphabetic';
+}
 
-  const R      = '\u001b[0m';
-  const GOLD   = '\u001b[1;33m';
-  const SILVER = '\u001b[0;37m';
-  const BRONZE = '\u001b[0;33m';
-  const CYAN   = '\u001b[0;36m';
-  const GRAY   = '\u001b[2;37m';
+// ── GENERATE LEADERBOARD IMAGE ───────────────────────────────
+async function generateLeaderboardImage(guild, pageData, pageIndex, totalPages, totalPlayers, globalStart) {
+  const W      = 740;
+  const HDR_H  = 105;
+  const COL_H  = 36;
+  const ROW_H  = 58;
+  const FOOT_H = 36;
+  const H      = HDR_H + COL_H + pageData.length * ROW_H + FOOT_H;
 
-  const W = 51;
-  const THICK = '\u2554' + '\u2550'.repeat(W) + '\u2557';
-  const MID   = '\u2560' + '\u2550'.repeat(W) + '\u2563';
-  const THIN  = '\u255f' + '\u2500'.repeat(W) + '\u2562';
-  const BOT   = '\u255a' + '\u2550'.repeat(W) + '\u255d';
+  const canvas = createCanvas(W, H);
+  const ctx    = canvas.getContext('2d');
 
-  function pad(str, len) { return String(str).substring(0, len).padEnd(len); }
-  function rpad(str, len) { return String(str).substring(0, len).padStart(len); }
-  function center(str, width) {
-    const gap = Math.max(0, width - str.length);
-    return ' '.repeat(Math.floor(gap / 2)) + str + ' '.repeat(Math.ceil(gap / 2));
-  }
-  function row(content, color) {
-    color = color || '';
-    const padded = content.length >= W
-      ? content.substring(0, W)
-      : content + ' '.repeat(W - content.length);
-    return GRAY + '\u2551' + R + color + padded + R + GRAY + '\u2551' + R;
-  }
+  // background
+  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
+  bgGrad.addColorStop(0, '#0f1021');
+  bgGrad.addColorStop(1, '#0b0c18');
+  ctx.fillStyle = bgGrad;
+  ctx.fillRect(0, 0, W, H);
 
-  for (let page = 0; page < totalPages; page++) {
-    const start    = page * itemsPerPage;
-    const end      = Math.min(start + itemsPerPage, sorted.length);
-    const pageData = sorted.slice(start, end);
-
-    const lines = [];
-    lines.push(GOLD + THICK + R);
-    lines.push(row(center('F R E E   F I R E   \u00b7   P L A Y E R   L E A D E R B O A R D', W), GOLD));
-    lines.push(GOLD + MID + R);
-    lines.push(row(center('Page ' + (page + 1) + ' of ' + totalPages + '   \u2022   ' + totalPlayers + ' players ranked', W), GRAY));
-    lines.push(GRAY + MID + R);
-    const hdr = '  ' + pad('RANK', 7) + pad('PLAYER', 17) + pad('W/L', 10) + pad('MVP', 7) + rpad('POINTS', 10);
-    lines.push(row(hdr, GRAY));
-    lines.push(GRAY + MID + R);
-
-    for (let i = 0; i < pageData.length; i++) {
-      const [, data] = pageData[i];
-      const globalRank = start + i + 1;
-
-      let color, rankLabel;
-      if      (globalRank === 1) { color = GOLD;   rankLabel = '#1'; }
-      else if (globalRank === 2) { color = SILVER; rankLabel = '#2'; }
-      else if (globalRank === 3) { color = BRONZE; rankLabel = '#3'; }
-      else if (globalRank <= 5)  { color = CYAN;   rankLabel = '#' + globalRank; }
-      else                       { color = GRAY;   rankLabel = '#' + globalRank; }
-
-      const colRank = pad(rankLabel, 7);
-      const colName = pad(data.username.substring(0, 15), 17);
-      const colWL   = pad(data.wins + '/' + data.losses, 10);
-      const colMvp  = pad(data.mvps, 7);
-      const colPts  = rpad(data.pts, 10);
-
-      lines.push(row('  ' + colRank + colName + colWL + colMvp + colPts, color));
-
-      if (globalRank === 3 && pageData.length > 3) {
-        lines.push(GRAY + THIN + R);
-      }
+  // dot grid texture
+  ctx.fillStyle = 'rgba(255,255,255,0.018)';
+  for (let gx = 20; gx < W; gx += 28)
+    for (let gy = 20; gy < H; gy += 28) {
+      ctx.beginPath(); ctx.arc(gx, gy, 1, 0, Math.PI * 2); ctx.fill();
     }
 
-    lines.push(GOLD + BOT + R);
+  // header panel
+  const hGrad = ctx.createLinearGradient(0, 0, W, HDR_H);
+  hGrad.addColorStop(0, '#1b1d35');
+  hGrad.addColorStop(1, '#14162a');
+  ctx.fillStyle = hGrad;
+  ctx.fillRect(0, 0, W, HDR_H);
 
-    const now = new Date().toLocaleString('en-US', {
-      month: 'short', day: '2-digit', year: 'numeric',
-      hour: '2-digit', minute: '2-digit', hour12: false,
-    });
+  // accent stripe top
+  const acGrad = ctx.createLinearGradient(0, 0, W, 0);
+  acGrad.addColorStop(0, '#5865f2');
+  acGrad.addColorStop(0.5, '#9b59b6');
+  acGrad.addColorStop(1, '#5865f2');
+  ctx.fillStyle = acGrad;
+  ctx.fillRect(0, 0, W, 4);
 
-    const embed = new EmbedBuilder()
-      .setColor(0x1a1c2e)
-      .setDescription('```ansi\n' + lines.join('\n') + '\n```')
-      .setFooter({ text: 'Last updated: ' + now + ' UTC  \u2022  Use /rank to check your stats' });
+  // header bottom line
+  ctx.fillStyle = 'rgba(88,101,242,0.35)';
+  ctx.fillRect(0, HDR_H - 1, W, 1);
 
-    embeds.push(embed);
+  // title
+  ctx.fillStyle = '#ffffff';
+  ctx.font = 'bold 26px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('PLAYER LEADERBOARD', W / 2, 48);
+
+  // subtitle
+  ctx.fillStyle = '#7986b0';
+  ctx.font = '13px Arial';
+  ctx.fillText('Page ' + (pageIndex + 1) + '/' + totalPages + '  •  ' + totalPlayers + ' players', W / 2, 76);
+
+  // column headers
+  ctx.fillStyle = 'rgba(15,17,33,0.95)';
+  ctx.fillRect(0, HDR_H, W, COL_H);
+  ctx.fillStyle = '#4a5675';
+  ctx.font = 'bold 11px Arial';
+  const colY = HDR_H + COL_H / 2 + 4;
+  const C = { rank: 55, avatar: 115, player: 155, wl: 440, mvp: 555, pts: 668 };
+  ctx.textAlign = 'center'; ctx.fillText('RANK',   C.rank,   colY);
+  ctx.textAlign = 'left';   ctx.fillText('PLAYER', C.player, colY);
+  ctx.textAlign = 'center'; ctx.fillText('W/L',    C.wl,     colY);
+  ctx.textAlign = 'center'; ctx.fillText('MVP',    C.mvp,    colY);
+  ctx.textAlign = 'center'; ctx.fillText('POINTS', C.pts,    colY);
+
+  // pre-fetch avatars
+  const avatarImgs = new Map();
+  try {
+    const ids  = pageData.map(([id]) => id);
+    const mems = await guild.members.fetch({ user: ids }).catch(() => new Map());
+    for (const [id, mem] of mems) {
+      try {
+        const url = mem.displayAvatarURL({ extension: 'png', size: 64, forceStatic: true });
+        const img = await Promise.race([
+          loadImage(url),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))
+        ]);
+        avatarImgs.set(id, img);
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  // rows
+  for (let i = 0; i < pageData.length; i++) {
+    const [userId, data] = pageData[i];
+    const globalRank = globalStart + i + 1;
+    const rowY = HDR_H + COL_H + i * ROW_H;
+
+    // row bg
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.025)' : 'rgba(0,0,0,0.12)';
+    ctx.fillRect(0, rowY, W, ROW_H);
+
+    // rank colours
+    let badgeHex, textHex;
+    if      (globalRank === 1) { badgeHex = '#FFD700'; textHex = '#1a1200'; }
+    else if (globalRank === 2) { badgeHex = '#C0C0C0'; textHex = '#111111'; }
+    else if (globalRank === 3) { badgeHex = '#cd7f32'; textHex = '#1a0800'; }
+    else if (globalRank <= 5)  { badgeHex = '#5865F2'; textHex = '#ffffff'; }
+    else if (globalRank <= 10) { badgeHex = '#2d3050'; textHex = '#8b9fc0'; }
+    else                       { badgeHex = '#1e2035'; textHex = '#5a6880'; }
+
+    // left accent stripe top 3
+    if (globalRank <= 3) {
+      ctx.fillStyle = badgeHex;
+      ctx.fillRect(0, rowY, 3, ROW_H);
+    }
+
+    // rank badge
+    const bW = 52, bH = 28;
+    const bX = C.rank - bW / 2, bY = rowY + (ROW_H - bH) / 2;
+    if (globalRank <= 3) {
+      ctx.shadowColor = badgeHex; ctx.shadowBlur = 10;
+    }
+    rrect(ctx, bX, bY, bW, bH, 7);
+    ctx.fillStyle = badgeHex; ctx.fill();
+    ctx.shadowBlur = 0;
+
+    ctx.fillStyle = textHex;
+    ctx.font = 'bold 13px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('#' + globalRank, C.rank, bY + bH / 2 + 5);
+
+    // avatar
+    const aR = 18, aCX = C.avatar, aCY = rowY + ROW_H / 2;
+    const img = avatarImgs.get(userId);
+    if (img) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(aCX, aCY, aR, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.drawImage(img, aCX - aR, aCY - aR, aR * 2, aR * 2);
+      ctx.restore();
+    } else {
+      drawAvatarFallback(ctx, aCX, aCY, aR, data.username);
+    }
+    ctx.beginPath();
+    ctx.arc(aCX, aCY, aR, 0, Math.PI * 2);
+    ctx.strokeStyle = globalRank <= 3 ? badgeHex : 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = globalRank <= 3 ? 2 : 1;
+    ctx.stroke();
+
+    const midY = rowY + ROW_H / 2 + 5;
+
+    // username
+    ctx.fillStyle = globalRank <= 3 ? '#ffffff' : '#c8d2ea';
+    ctx.font = globalRank <= 3 ? 'bold 15px Arial' : '14px Arial';
+    ctx.textAlign = 'left';
+    ctx.fillText(data.username.substring(0, 22), C.player, midY);
+
+    // W/L
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#7986b0';
+    ctx.font = '13px Arial';
+    ctx.fillText(data.wins + '/' + data.losses, C.wl, midY);
+
+    // MVP
+    ctx.fillText(data.mvps, C.mvp, midY);
+
+    // points badge
+    const pText = String(data.pts);
+    const pW = 72, pH = 28;
+    const pX = C.pts - pW / 2, pY = rowY + (ROW_H - pH) / 2;
+    rrect(ctx, pX, pY, pW, pH, 7);
+    ctx.fillStyle = globalRank <= 3 ? badgeHex + '28' : 'rgba(88,101,242,0.15)';
+    ctx.fill();
+    if (globalRank <= 3) { ctx.shadowColor = badgeHex; ctx.shadowBlur = 6; }
+    ctx.fillStyle = globalRank <= 3 ? badgeHex : '#7289da';
+    ctx.font = 'bold 14px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText(pText, C.pts, pY + pH / 2 + 5);
+    ctx.shadowBlur = 0;
+
+    // row separator
+    if (i < pageData.length - 1) {
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.fillRect(16, rowY + ROW_H - 1, W - 32, 1);
+    }
+    // podium divider after rank 3
+    if (globalRank === 3 && pageData.length > 3) {
+      ctx.fillStyle = 'rgba(88,101,242,0.3)';
+      ctx.fillRect(0, rowY + ROW_H - 1, W, 1);
+    }
   }
 
-  if (embeds.length > 0) return embeds;
+  // footer
+  const fY = HDR_H + COL_H + pageData.length * ROW_H;
+  ctx.fillStyle = 'rgba(10,11,22,0.9)';
+  ctx.fillRect(0, fY, W, FOOT_H);
+  ctx.fillStyle = 'rgba(88,101,242,0.3)';
+  ctx.fillRect(0, fY, W, 1);
+  const now = new Date().toLocaleString('en-US', {
+    month: 'short', day: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  });
+  ctx.fillStyle = '#3a4460';
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('Last updated: ' + now + ' UTC  •  Use /rank to check your stats', W / 2, fY + FOOT_H / 2 + 4);
 
-  const emptyLines = [
-    GOLD + THICK + R,
-    row(center('F R E E   F I R E   \u00b7   P L A Y E R   L E A D E R B O A R D', W), GOLD),
-    GOLD + MID + R,
-    row(center('No players ranked yet  \u2014  play matches to get on the board!', W), GRAY),
-    GOLD + BOT + R,
-  ];
-  return [
-    new EmbedBuilder()
-      .setColor(0x1a1c2e)
-      .setDescription('```ansi\n' + emptyLines.join('\n') + '\n```')
-      .setFooter({ text: 'Use /play to start a match' }),
-  ];
+  return canvas.toBuffer('image/png');
 }
 
 // ── CREATE STAT BAR ────────────────────────────────────────
@@ -226,7 +353,7 @@ function createStatBar(points) {
   const maxPoints = 5000;
   const filled = Math.min(10, Math.floor((points / maxPoints) * 10));
   const empty  = 10 - filled;
-  return '`' + '\u2588'.repeat(filled) + '\u2591'.repeat(empty) + '`';
+  return '`' + '█'.repeat(filled) + '░'.repeat(empty) + '`';
 }
 
 // ── POINTS SYSTEM ──────────────────────────────────────────
@@ -477,66 +604,59 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Match \`${roomId}\` cancelled and players moved back.`, ephemeral: true });
     }
 
-    // /leaderboard (BEAUTIFUL EMBEDS)
+    // /leaderboard (IMAGE)
     if (interaction.isChatInputCommand() && interaction.commandName === 'leaderboard') {
       await interaction.deferReply();
-      
       try {
-        const embeds = generateLeaderboardEmbeds();
-        
-        if (embeds.length === 1) {
-          return interaction.editReply({ embeds });
+        const pts = loadPoints();
+        const sorted = Object.entries(pts)
+          .filter(([, v]) => v.pts > 0)
+          .sort((a, b) => b[1].pts - a[1].pts);
+
+        const ITEMS        = 10;
+        const totalPlayers = sorted.length;
+        const totalPages   = Math.max(1, Math.ceil(totalPlayers / ITEMS));
+
+        if (totalPlayers === 0) {
+          return interaction.editReply({ content: '📭 No players ranked yet. Play matches to get on the board!' });
         }
 
-        // Pagination for multiple pages
         let currentPage = 0;
-        const getButtons = (page) => {
-          const prevBtn = new ButtonBuilder()
-            .setCustomId(`lb_prev_${page}`)
-            .setLabel('⬅️')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page === 0);
-
-          const nextBtn = new ButtonBuilder()
-            .setCustomId(`lb_next_${page}`)
-            .setLabel('➡️')
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(page === embeds.length - 1);
-
-          return new ActionRowBuilder().addComponents(prevBtn, nextBtn);
+        const getSlice = (p) => {
+          const s = p * ITEMS;
+          return { pageData: sorted.slice(s, s + ITEMS), start: s };
         };
+        const getButtons = (p) => new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('lb_prev_' + p).setLabel('◄  Prev').setStyle(ButtonStyle.Secondary).setDisabled(p === 0),
+          new ButtonBuilder().setCustomId('lb_next_' + p).setLabel('Next  ►').setStyle(ButtonStyle.Secondary).setDisabled(p >= totalPages - 1)
+        );
 
-        const msg = await interaction.editReply({ 
-          embeds: [embeds[0]], 
-          components: [getButtons(0)] 
+        const { pageData, start } = getSlice(0);
+        const buf = await generateLeaderboardImage(interaction.guild, pageData, 0, totalPages, totalPlayers, start);
+        const att = new AttachmentBuilder(buf, { name: 'leaderboard.png' });
+        const msg = await interaction.editReply({
+          files: [att],
+          components: totalPages > 1 ? [getButtons(0)] : [],
         });
 
-        // Create a filter for button interactions
-        const collector = msg.createMessageComponentCollector({ time: 60000 });
+        if (totalPages <= 1) return;
 
-        collector.on('collect', async (btnInteraction) => {
-          if (btnInteraction.user.id !== interaction.user.id) {
-            return btnInteraction.reply({ content: '❌ You cannot use this button!', ephemeral: true });
-          }
-
-          if (btnInteraction.customId.startsWith('lb_prev_')) {
-            currentPage = Math.max(0, currentPage - 1);
-          } else if (btnInteraction.customId.startsWith('lb_next_')) {
-            currentPage = Math.min(embeds.length - 1, currentPage + 1);
-          }
-
-          await btnInteraction.update({ 
-            embeds: [embeds[currentPage]], 
-            components: [getButtons(currentPage)] 
-          });
+        const collector = msg.createMessageComponentCollector({ time: 120000 });
+        collector.on('collect', async (btn) => {
+          if (btn.user.id !== interaction.user.id)
+            return btn.reply({ content: '❌ Only the person who ran /leaderboard can use these buttons.', ephemeral: true });
+          if (btn.customId.startsWith('lb_prev_')) currentPage = Math.max(0, currentPage - 1);
+          else if (btn.customId.startsWith('lb_next_')) currentPage = Math.min(totalPages - 1, currentPage + 1);
+          await btn.deferUpdate();
+          const { pageData: pd, start: s } = getSlice(currentPage);
+          const newBuf = await generateLeaderboardImage(interaction.guild, pd, currentPage, totalPages, totalPlayers, s);
+          const newAtt = new AttachmentBuilder(newBuf, { name: 'leaderboard.png' });
+          await btn.editReply({ files: [newAtt], components: [getButtons(currentPage)] });
         });
-
-        collector.on('end', () => {
-          msg.edit({ components: [] }).catch(() => {});
-        });
+        collector.on('end', () => msg.edit({ components: [] }).catch(() => {}));
       } catch (err) {
         console.error('❌ Leaderboard error:', err);
-        return interaction.editReply({ content: '❌ Failed to generate leaderboard.' });
+        return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
       }
     }
 
