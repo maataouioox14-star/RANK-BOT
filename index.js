@@ -119,56 +119,114 @@ function generateLeaderboardEmbeds() {
     .sort((a, b) => b[1].pts - a[1].pts);
 
   const embeds = [];
-  const itemsPerPage = 5;
+  const itemsPerPage = 10;
   const totalPages = Math.ceil(sorted.length / itemsPerPage);
+  const totalPlayers = sorted.length;
+
+  const R      = '\u001b[0m';
+  const GOLD   = '\u001b[1;33m';
+  const SILVER = '\u001b[0;37m';
+  const BRONZE = '\u001b[0;33m';
+  const CYAN   = '\u001b[0;36m';
+  const GRAY   = '\u001b[2;37m';
+
+  const W = 51;
+  const THICK = '\u2554' + '\u2550'.repeat(W) + '\u2557';
+  const MID   = '\u2560' + '\u2550'.repeat(W) + '\u2563';
+  const THIN  = '\u255f' + '\u2500'.repeat(W) + '\u2562';
+  const BOT   = '\u255a' + '\u2550'.repeat(W) + '\u255d';
+
+  function pad(str, len) { return String(str).substring(0, len).padEnd(len); }
+  function rpad(str, len) { return String(str).substring(0, len).padStart(len); }
+  function center(str, width) {
+    const gap = Math.max(0, width - str.length);
+    return ' '.repeat(Math.floor(gap / 2)) + str + ' '.repeat(Math.ceil(gap / 2));
+  }
+  function row(content, color) {
+    color = color || '';
+    const padded = content.length >= W
+      ? content.substring(0, W)
+      : content + ' '.repeat(W - content.length);
+    return GRAY + '\u2551' + R + color + padded + R + GRAY + '\u2551' + R;
+  }
 
   for (let page = 0; page < totalPages; page++) {
-    const start = page * itemsPerPage;
-    const end = Math.min(start + itemsPerPage, sorted.length);
+    const start    = page * itemsPerPage;
+    const end      = Math.min(start + itemsPerPage, sorted.length);
     const pageData = sorted.slice(start, end);
 
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 FREE FIRE LEADERBOARD 🏆')
-      .setColor(0xffd700)
-      .setFooter({ text: `Page ${page + 1}/${totalPages} • Top Players` });
-
-    const medals = ['🥇', '🥈', '🥉'];
-    let description = '';
+    const lines = [];
+    lines.push(GOLD + THICK + R);
+    lines.push(row(center('F R E E   F I R E   \u00b7   P L A Y E R   L E A D E R B O A R D', W), GOLD));
+    lines.push(GOLD + MID + R);
+    lines.push(row(center('Page ' + (page + 1) + ' of ' + totalPages + '   \u2022   ' + totalPlayers + ' players ranked', W), GRAY));
+    lines.push(GRAY + MID + R);
+    const hdr = '  ' + pad('RANK', 7) + pad('PLAYER', 17) + pad('W/L', 10) + pad('MVP', 7) + rpad('POINTS', 10);
+    lines.push(row(hdr, GRAY));
+    lines.push(GRAY + MID + R);
 
     for (let i = 0; i < pageData.length; i++) {
-      const [userId, data] = pageData[i];
+      const [, data] = pageData[i];
       const globalRank = start + i + 1;
-      const medal = medals[globalRank - 1] || `#${globalRank}`;
-      
-      const winRate = data.matches > 0 ? ((data.wins / data.matches) * 100).toFixed(0) : 0;
-      const statBar = createStatBar(data.pts);
 
-      description += 
-        `${medal} **${data.username.substring(0, 20)}**\n` +
-        `├ 💯 Points: **${data.pts}** ${statBar}\n` +
-        `├ 🎮 ${data.wins}W / ${data.losses}L (${winRate}%)\n` +
-        `└ 👑 MVPs: **${data.mvps}** | Matches: **${data.matches}**\n\n`;
+      let color, rankLabel;
+      if      (globalRank === 1) { color = GOLD;   rankLabel = '#1'; }
+      else if (globalRank === 2) { color = SILVER; rankLabel = '#2'; }
+      else if (globalRank === 3) { color = BRONZE; rankLabel = '#3'; }
+      else if (globalRank <= 5)  { color = CYAN;   rankLabel = '#' + globalRank; }
+      else                       { color = GRAY;   rankLabel = '#' + globalRank; }
+
+      const colRank = pad(rankLabel, 7);
+      const colName = pad(data.username.substring(0, 15), 17);
+      const colWL   = pad(data.wins + '/' + data.losses, 10);
+      const colMvp  = pad(data.mvps, 7);
+      const colPts  = rpad(data.pts, 10);
+
+      lines.push(row('  ' + colRank + colName + colWL + colMvp + colPts, color));
+
+      if (globalRank === 3 && pageData.length > 3) {
+        lines.push(GRAY + THIN + R);
+      }
     }
 
-    embed.setDescription(description);
+    lines.push(GOLD + BOT + R);
+
+    const now = new Date().toLocaleString('en-US', {
+      month: 'short', day: '2-digit', year: 'numeric',
+      hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+
+    const embed = new EmbedBuilder()
+      .setColor(0x1a1c2e)
+      .setDescription('```ansi\n' + lines.join('\n') + '\n```')
+      .setFooter({ text: 'Last updated: ' + now + ' UTC  \u2022  Use /rank to check your stats' });
+
     embeds.push(embed);
   }
 
-  return embeds.length > 0 ? embeds : [
+  if (embeds.length > 0) return embeds;
+
+  const emptyLines = [
+    GOLD + THICK + R,
+    row(center('F R E E   F I R E   \u00b7   P L A Y E R   L E A D E R B O A R D', W), GOLD),
+    GOLD + MID + R,
+    row(center('No players ranked yet  \u2014  play matches to get on the board!', W), GRAY),
+    GOLD + BOT + R,
+  ];
+  return [
     new EmbedBuilder()
-      .setTitle('🏆 FREE FIRE LEADERBOARD 🏆')
-      .setDescription('📭 No players ranked yet. Play matches to get on the board!')
-      .setColor(0x99aab5)
+      .setColor(0x1a1c2e)
+      .setDescription('```ansi\n' + emptyLines.join('\n') + '\n```')
+      .setFooter({ text: 'Use /play to start a match' }),
   ];
 }
 
 // ── CREATE STAT BAR ────────────────────────────────────────
 function createStatBar(points) {
-  const maxPoints = 1000;
-  const filledBlocks = Math.floor((points / maxPoints) * 10);
-  const emptyBlocks = 10 - filledBlocks;
-  const bar = '▰'.repeat(Math.min(filledBlocks, 10)) + '▱'.repeat(Math.max(emptyBlocks, 0));
-  return `[${bar}]`;
+  const maxPoints = 5000;
+  const filled = Math.min(10, Math.floor((points / maxPoints) * 10));
+  const empty  = 10 - filled;
+  return '`' + '\u2588'.repeat(filled) + '\u2591'.repeat(empty) + '`';
 }
 
 // ── POINTS SYSTEM ──────────────────────────────────────────
