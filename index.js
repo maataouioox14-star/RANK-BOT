@@ -16,10 +16,8 @@ const {
   Routes,
   SlashCommandBuilder,
   ChannelType,
-  AttachmentBuilder,
 } = require('discord.js');
 const fs = require('fs');
-const { createCanvas, loadImage, registerFont } = require('canvas');
 const https = require('https');
 const path = require('path');
 
@@ -113,104 +111,64 @@ async function updateNickname(guild, userId) {
   } catch {}
 }
 
-// ── DOWNLOAD IMAGE ─────────────────────────────────────────
-function downloadImage(url) {
-  return new Promise((resolve, reject) => {
-    https.get(url, { timeout: 5000 }, res => {
-      const chunks = [];
-      res.on('data', chunk => chunks.push(chunk));
-      res.on('end', () => resolve(Buffer.concat(chunks)));
-      res.on('error', reject);
-    }).on('error', reject);
-  });
-}
-
-// ── GENERATE LEADERBOARD IMAGE ─────────────────────────────
-async function generateLeaderboardImage() {
+// ── GENERATE LEADERBOARD EMBEDS ────────────────────────────
+function generateLeaderboardEmbeds() {
   const pts = loadPoints();
   const sorted = Object.entries(pts)
     .filter(([, v]) => v.pts > 0)
-    .sort((a, b) => b[1].pts - a[1].pts)
-    .slice(0, 10);
+    .sort((a, b) => b[1].pts - a[1].pts);
 
-  const width = 1200;
-  const height = 100 + sorted.length * 100;
-  const canvas = createCanvas(width, height);
-  const ctx = canvas.getContext('2d');
+  const embeds = [];
+  const itemsPerPage = 5;
+  const totalPages = Math.ceil(sorted.length / itemsPerPage);
 
-  // Background gradient
-  const gradient = ctx.createLinearGradient(0, 0, 0, height);
-  gradient.addColorStop(0, '#1a1a2e');
-  gradient.addColorStop(1, '#16213e');
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, width, height);
+  for (let page = 0; page < totalPages; page++) {
+    const start = page * itemsPerPage;
+    const end = Math.min(start + itemsPerPage, sorted.length);
+    const pageData = sorted.slice(start, end);
 
-  // Title
-  ctx.fillStyle = '#ffd700';
-  ctx.font = 'bold 48px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('🏆 LEADERBOARD 🏆', width / 2, 60);
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 FREE FIRE LEADERBOARD 🏆')
+      .setColor(0xffd700)
+      .setFooter({ text: `Page ${page + 1}/${totalPages} • Top Players` });
 
-  // Headers
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 24px Arial';
-  ctx.textAlign = 'left';
-  ctx.fillText('RANK', 20, 110);
-  ctx.fillText('PLAYER', 120, 110);
-  ctx.fillText('W/L', 700, 110);
-  ctx.fillText('MVP', 850, 110);
-  ctx.fillText('POINTS', 950, 110);
+    const medals = ['🥇', '🥈', '🥉'];
+    let description = '';
 
-  // Separator line
-  ctx.strokeStyle = '#ffd700';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(20, 130);
-  ctx.lineTo(width - 20, 130);
-  ctx.stroke();
+    for (let i = 0; i < pageData.length; i++) {
+      const [userId, data] = pageData[i];
+      const globalRank = start + i + 1;
+      const medal = medals[globalRank - 1] || `#${globalRank}`;
+      
+      const winRate = data.matches > 0 ? ((data.wins / data.matches) * 100).toFixed(0) : 0;
+      const statBar = createStatBar(data.pts);
 
-  // Rows
-  let yPos = 160;
-  const medals = ['🥇', '🥈', '🥉'];
+      description += 
+        `${medal} **${data.username.substring(0, 20)}**\n` +
+        `├ 💯 Points: **${data.pts}** ${statBar}\n` +
+        `├ 🎮 ${data.wins}W / ${data.losses}L (${winRate}%)\n` +
+        `└ 👑 MVPs: **${data.mvps}** | Matches: **${data.matches}**\n\n`;
+    }
 
-  for (let i = 0; i < sorted.length; i++) {
-    const [userId, data] = sorted[i];
-    const rank = i + 1;
-    const medal = medals[i] || `#${rank}`;
-
-    // Row background (alternating)
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255, 255, 255, 0.05)' : 'rgba(255, 215, 0, 0.05)';
-    ctx.fillRect(20, yPos - 35, width - 40, 85);
-
-    // Rank
-    ctx.fillStyle = '#ffd700';
-    ctx.font = 'bold 28px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(medal, 30, yPos);
-
-    // Player name
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 22px Arial';
-    ctx.fillText(data.username.substring(0, 25), 120, yPos);
-
-    // W/L
-    ctx.fillStyle = '#87ceeb';
-    ctx.font = '20px Arial';
-    ctx.fillText(`${data.wins}W/${data.losses}L`, 700, yPos);
-
-    // MVP
-    ctx.fillStyle = '#ff69b4';
-    ctx.fillText(String(data.mvps), 850, yPos);
-
-    // Points
-    ctx.fillStyle = '#00ff00';
-    ctx.font = 'bold 24px Arial';
-    ctx.fillText(String(data.pts), 950, yPos);
-
-    yPos += 100;
+    embed.setDescription(description);
+    embeds.push(embed);
   }
 
-  return canvas.createPNGStream();
+  return embeds.length > 0 ? embeds : [
+    new EmbedBuilder()
+      .setTitle('🏆 FREE FIRE LEADERBOARD 🏆')
+      .setDescription('📭 No players ranked yet. Play matches to get on the board!')
+      .setColor(0x99aab5)
+  ];
+}
+
+// ── CREATE STAT BAR ────────────────────────────────────────
+function createStatBar(points) {
+  const maxPoints = 1000;
+  const filledBlocks = Math.floor((points / maxPoints) * 10);
+  const emptyBlocks = 10 - filledBlocks;
+  const bar = '▰'.repeat(Math.min(filledBlocks, 10)) + '▱'.repeat(Math.max(emptyBlocks, 0));
+  return `[${bar}]`;
 }
 
 // ── POINTS SYSTEM ──────────────────────────────────────────
@@ -322,7 +280,7 @@ const commands = [
     .addStringOption(o => o.setName('roomid').setDescription('Room ID of the match').setRequired(true)),
   new SlashCommandBuilder()
     .setName('leaderboard')
-    .setDescription('Show the top 10 players as image'),
+    .setDescription('Show the top 10 players ranked by points'),
   new SlashCommandBuilder()
     .setName('rank')
     .setDescription('Check your rank and points'),
@@ -461,24 +419,66 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `✅ Match \`${roomId}\` cancelled and players moved back.`, ephemeral: true });
     }
 
-    // /leaderboard (TOP 10 as IMAGE)
+    // /leaderboard (BEAUTIFUL EMBEDS)
     if (interaction.isChatInputCommand() && interaction.commandName === 'leaderboard') {
       await interaction.deferReply();
       
       try {
-        const stream = await generateLeaderboardImage();
-        const buffer = await new Promise((resolve, reject) => {
-          const chunks = [];
-          stream.on('data', chunk => chunks.push(chunk));
-          stream.on('end', () => resolve(Buffer.concat(chunks)));
-          stream.on('error', reject);
+        const embeds = generateLeaderboardEmbeds();
+        
+        if (embeds.length === 1) {
+          return interaction.editReply({ embeds });
+        }
+
+        // Pagination for multiple pages
+        let currentPage = 0;
+        const getButtons = (page) => {
+          const prevBtn = new ButtonBuilder()
+            .setCustomId(`lb_prev_${page}`)
+            .setLabel('⬅️')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === 0);
+
+          const nextBtn = new ButtonBuilder()
+            .setCustomId(`lb_next_${page}`)
+            .setLabel('➡️')
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(page === embeds.length - 1);
+
+          return new ActionRowBuilder().addComponents(prevBtn, nextBtn);
+        };
+
+        const msg = await interaction.editReply({ 
+          embeds: [embeds[0]], 
+          components: [getButtons(0)] 
         });
 
-        const attachment = new AttachmentBuilder(buffer, { name: 'leaderboard.png' });
-        return interaction.editReply({ files: [attachment] });
+        // Create a filter for button interactions
+        const collector = msg.createMessageComponentCollector({ time: 60000 });
+
+        collector.on('collect', async (btnInteraction) => {
+          if (btnInteraction.user.id !== interaction.user.id) {
+            return btnInteraction.reply({ content: '❌ You cannot use this button!', ephemeral: true });
+          }
+
+          if (btnInteraction.customId.startsWith('lb_prev_')) {
+            currentPage = Math.max(0, currentPage - 1);
+          } else if (btnInteraction.customId.startsWith('lb_next_')) {
+            currentPage = Math.min(embeds.length - 1, currentPage + 1);
+          }
+
+          await btnInteraction.update({ 
+            embeds: [embeds[currentPage]], 
+            components: [getButtons(currentPage)] 
+          });
+        });
+
+        collector.on('end', () => {
+          msg.edit({ components: [] }).catch(() => {});
+        });
       } catch (err) {
-        console.error('❌ Leaderboard image error:', err);
-        return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
+        console.error('❌ Leaderboard error:', err);
+        return interaction.editReply({ content: '❌ Failed to generate leaderboard.' });
       }
     }
 
@@ -495,16 +495,19 @@ client.on('interactionCreate', async (interaction) => {
       const matches = data?.matches || 0;
       const winRate = matches > 0 ? ((wins / matches) * 100).toFixed(1) : 0;
 
+      const statBar = createStatBar(points);
+
       const embed = new EmbedBuilder()
         .setTitle(`📊 ${interaction.user.username}'s Stats`)
         .setThumbnail(interaction.user.displayAvatarURL({ size: 256 }))
+        .setDescription(`**${statBar}**`)
         .addFields(
-          { name: '💯 POINTS', value: `${points}`, inline: true },
-          { name: '✅ WINS', value: `${wins}`, inline: true },
-          { name: '❌ LOSSES', value: `${losses}`, inline: true },
-          { name: '👑 MVPs', value: `${mvps}`, inline: true },
-          { name: '🎮 MATCHES', value: `${matches}`, inline: true },
-          { name: '📈 WIN RATE', value: `${winRate}%`, inline: true },
+          { name: '💯 POINTS', value: `\`${points}\``, inline: true },
+          { name: '✅ WINS', value: `\`${wins}\``, inline: true },
+          { name: '❌ LOSSES', value: `\`${losses}\``, inline: true },
+          { name: '👑 MVPs', value: `\`${mvps}\``, inline: true },
+          { name: '🎮 MATCHES', value: `\`${matches}\``, inline: true },
+          { name: '📈 WIN RATE', value: `\`${winRate}%\``, inline: true },
         )
         .setColor(rank ? 0x5865f2 : 0x99aab5)
         .setFooter({ text: rank ? `🏅 Rank #${rank}` : '🔓 Unranked' })
