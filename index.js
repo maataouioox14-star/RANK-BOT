@@ -143,76 +143,25 @@ function drawAvatarFallback(ctx, cx, cy, r, username) {
   ctx.textBaseline = 'alphabetic';
 }
 
-// ── GENERATE LEADERBOARD IMAGE ───────────────────────────────
+// ── GENERATE LEADERBOARD IMAGE (animated GIF) ─────────────────────
 async function generateLeaderboardImage(guild, pageData, pageIndex, totalPages, totalPlayers, globalStart) {
-  const W      = 740;
-  const HDR_H  = 105;
-  const COL_H  = 36;
-  const ROW_H  = 58;
-  const FOOT_H = 36;
-  const H      = HDR_H + COL_H + pageData.length * ROW_H + FOOT_H;
-
-  const canvas = createCanvas(W, H);
-  const ctx    = canvas.getContext('2d');
-
-  // background
-  const bgGrad = ctx.createLinearGradient(0, 0, 0, H);
-  bgGrad.addColorStop(0, '#0f1021');
-  bgGrad.addColorStop(1, '#0b0c18');
-  ctx.fillStyle = bgGrad;
-  ctx.fillRect(0, 0, W, H);
-
-  // dot grid texture
-  ctx.fillStyle = 'rgba(255,255,255,0.018)';
-  for (let gx = 20; gx < W; gx += 28)
-    for (let gy = 20; gy < H; gy += 28) {
-      ctx.beginPath(); ctx.arc(gx, gy, 1, 0, Math.PI * 2); ctx.fill();
-    }
-
-  // header panel
-  const hGrad = ctx.createLinearGradient(0, 0, W, HDR_H);
-  hGrad.addColorStop(0, '#1b1d35');
-  hGrad.addColorStop(1, '#14162a');
-  ctx.fillStyle = hGrad;
-  ctx.fillRect(0, 0, W, HDR_H);
-
-  // accent stripe top
-  const acGrad = ctx.createLinearGradient(0, 0, W, 0);
-  acGrad.addColorStop(0, '#5865f2');
-  acGrad.addColorStop(0.5, '#9b59b6');
-  acGrad.addColorStop(1, '#5865f2');
-  ctx.fillStyle = acGrad;
-  ctx.fillRect(0, 0, W, 4);
-
-  // header bottom line
-  ctx.fillStyle = 'rgba(88,101,242,0.35)';
-  ctx.fillRect(0, HDR_H - 1, W, 1);
-
-  // title
-  ctx.fillStyle = '#ffffff';
-  ctx.font = 'bold 26px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('PLAYER LEADERBOARD', W / 2, 48);
-
-  // subtitle
-  ctx.fillStyle = '#7986b0';
-  ctx.font = '13px Arial';
-  ctx.fillText('Page ' + (pageIndex + 1) + '/' + totalPages + '  •  ' + totalPlayers + ' players', W / 2, 76);
-
-  // column headers
-  ctx.fillStyle = 'rgba(15,17,33,0.95)';
-  ctx.fillRect(0, HDR_H, W, COL_H);
-  ctx.fillStyle = '#4a5675';
-  ctx.font = 'bold 11px Arial';
-  const colY = HDR_H + COL_H / 2 + 4;
+  const GIFEncoder = require('gif-encoder-2');
+  const W = 740, HDR_H = 105, COL_H = 36, ROW_H = 58, FOOT_H = 36;
+  const H = HDR_H + COL_H + pageData.length * ROW_H + FOOT_H;
   const C = { rank: 55, avatar: 115, player: 155, wl: 440, mvp: 555, pts: 668 };
-  ctx.textAlign = 'center'; ctx.fillText('RANK',   C.rank,   colY);
-  ctx.textAlign = 'left';   ctx.fillText('PLAYER', C.player, colY);
-  ctx.textAlign = 'center'; ctx.fillText('W/L',    C.wl,     colY);
-  ctx.textAlign = 'center'; ctx.fillText('MVP',    C.mvp,    colY);
-  ctx.textAlign = 'center'; ctx.fillText('POINTS', C.pts,    colY);
+  const bW = 52, bH = 28;
 
-  // pre-fetch avatars
+  function hexRGB(h) { return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)]; }
+  function rankStyle(r) {
+    if (r===1) return { badge:'#FFD700', text:'#1a1200' };
+    if (r===2) return { badge:'#C0C0C0', text:'#111111' };
+    if (r===3) return { badge:'#cd7f32', text:'#1a0800' };
+    if (r<=5)  return { badge:'#5865F2', text:'#ffffff' };
+    if (r<=10) return { badge:'#2d3050', text:'#8b9fc0' };
+    return             { badge:'#1e2035', text:'#5a6880' };
+  }
+
+  // pre-fetch avatars once
   const avatarImgs = new Map();
   try {
     const ids  = pageData.map(([id]) => id);
@@ -220,133 +169,145 @@ async function generateLeaderboardImage(guild, pageData, pageIndex, totalPages, 
     for (const [id, mem] of mems) {
       try {
         const url = mem.displayAvatarURL({ extension: 'png', size: 64, forceStatic: true });
-        const img = await Promise.race([
-          loadImage(url),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 4000))
-        ]);
+        const img = await Promise.race([loadImage(url), new Promise((_,rej) => setTimeout(() => rej(new Error('to')), 4000))]);
         avatarImgs.set(id, img);
       } catch (_) {}
     }
   } catch (_) {}
 
-  // rows
-  for (let i = 0; i < pageData.length; i++) {
-    const [userId, data] = pageData[i];
-    const globalRank = globalStart + i + 1;
-    const rowY = HDR_H + COL_H + i * ROW_H;
+  // draw static base canvas
+  const base = createCanvas(W, H);
+  const bc   = base.getContext('2d');
 
-    // row bg
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(255,255,255,0.025)' : 'rgba(0,0,0,0.12)';
-    ctx.fillRect(0, rowY, W, ROW_H);
+  const bgG = bc.createLinearGradient(0,0,0,H);
+  bgG.addColorStop(0,'#0f1021'); bgG.addColorStop(1,'#0b0c18');
+  bc.fillStyle = bgG; bc.fillRect(0,0,W,H);
 
-    // rank colours
-    let badgeHex, textHex;
-    if      (globalRank === 1) { badgeHex = '#FFD700'; textHex = '#1a1200'; }
-    else if (globalRank === 2) { badgeHex = '#C0C0C0'; textHex = '#111111'; }
-    else if (globalRank === 3) { badgeHex = '#cd7f32'; textHex = '#1a0800'; }
-    else if (globalRank <= 5)  { badgeHex = '#5865F2'; textHex = '#ffffff'; }
-    else if (globalRank <= 10) { badgeHex = '#2d3050'; textHex = '#8b9fc0'; }
-    else                       { badgeHex = '#1e2035'; textHex = '#5a6880'; }
+  bc.fillStyle = 'rgba(255,255,255,0.018)';
+  for (let gx=20;gx<W;gx+=28) for (let gy=20;gy<H;gy+=28) { bc.beginPath(); bc.arc(gx,gy,1,0,Math.PI*2); bc.fill(); }
 
-    // left accent stripe top 3
-    if (globalRank <= 3) {
-      ctx.fillStyle = badgeHex;
-      ctx.fillRect(0, rowY, 3, ROW_H);
-    }
+  const hG = bc.createLinearGradient(0,0,W,HDR_H);
+  hG.addColorStop(0,'#1b1d35'); hG.addColorStop(1,'#14162a');
+  bc.fillStyle = hG; bc.fillRect(0,0,W,HDR_H);
 
-    // rank badge
-    const bW = 52, bH = 28;
-    const bX = C.rank - bW / 2, bY = rowY + (ROW_H - bH) / 2;
-    if (globalRank <= 3) {
-      ctx.shadowColor = badgeHex; ctx.shadowBlur = 10;
-    }
-    rrect(ctx, bX, bY, bW, bH, 7);
-    ctx.fillStyle = badgeHex; ctx.fill();
-    ctx.shadowBlur = 0;
+  const acG = bc.createLinearGradient(0,0,W,0);
+  acG.addColorStop(0,'#5865f2'); acG.addColorStop(0.5,'#9b59b6'); acG.addColorStop(1,'#5865f2');
+  bc.fillStyle = acG; bc.fillRect(0,0,W,4);
+  bc.fillStyle = 'rgba(88,101,242,0.35)'; bc.fillRect(0,HDR_H-1,W,1);
 
-    ctx.fillStyle = textHex;
-    ctx.font = 'bold 13px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('#' + globalRank, C.rank, bY + bH / 2 + 5);
+  bc.fillStyle = '#ffffff'; bc.font = 'bold 26px Arial'; bc.textAlign = 'center';
+  bc.fillText('PLAYER LEADERBOARD', W/2, 48);
+  bc.fillStyle = '#7986b0'; bc.font = '13px Arial';
+  bc.fillText('Page '+(pageIndex+1)+'/'+totalPages+'  •  '+totalPlayers+' players', W/2, 76);
 
-    // avatar
-    const aR = 18, aCX = C.avatar, aCY = rowY + ROW_H / 2;
+  bc.fillStyle = 'rgba(15,17,33,0.95)'; bc.fillRect(0,HDR_H,W,COL_H);
+  bc.fillStyle = '#4a5675'; bc.font = 'bold 11px Arial';
+  const colY = HDR_H+COL_H/2+4;
+  bc.textAlign='center'; bc.fillText('RANK',C.rank,colY);
+  bc.textAlign='left';   bc.fillText('PLAYER',C.player,colY);
+  bc.textAlign='center'; bc.fillText('W/L',C.wl,colY);
+  bc.textAlign='center'; bc.fillText('MVP',C.mvp,colY);
+  bc.textAlign='center'; bc.fillText('POINTS',C.pts,colY);
+
+  for (let i=0;i<pageData.length;i++) {
+    const [userId,data] = pageData[i];
+    const gr   = globalStart+i+1;
+    const rowY = HDR_H+COL_H+i*ROW_H;
+    const {badge:bHex,text:tHex} = rankStyle(gr);
+
+    bc.fillStyle = i%2===0?'rgba(255,255,255,0.025)':'rgba(0,0,0,0.12)'; bc.fillRect(0,rowY,W,ROW_H);
+    if (gr<=3) { bc.fillStyle=bHex; bc.fillRect(0,rowY,3,ROW_H); }
+
+    const bX=C.rank-bW/2, bY=rowY+(ROW_H-bH)/2;
+    rrect(bc,bX,bY,bW,bH,7); bc.fillStyle=bHex; bc.fill();
+    bc.fillStyle=tHex; bc.font='bold 13px Arial'; bc.textAlign='center';
+    bc.fillText('#'+gr, C.rank, bY+bH/2+5);
+
+    const aR=18, aCX=C.avatar, aCY=rowY+ROW_H/2;
     const img = avatarImgs.get(userId);
     if (img) {
-      ctx.save();
-      ctx.beginPath();
-      ctx.arc(aCX, aCY, aR, 0, Math.PI * 2);
-      ctx.clip();
-      ctx.drawImage(img, aCX - aR, aCY - aR, aR * 2, aR * 2);
-      ctx.restore();
-    } else {
-      drawAvatarFallback(ctx, aCX, aCY, aR, data.username);
-    }
-    ctx.beginPath();
-    ctx.arc(aCX, aCY, aR, 0, Math.PI * 2);
-    ctx.strokeStyle = globalRank <= 3 ? badgeHex : 'rgba(255,255,255,0.1)';
-    ctx.lineWidth = globalRank <= 3 ? 2 : 1;
-    ctx.stroke();
+      bc.save(); bc.beginPath(); bc.arc(aCX,aCY,aR,0,Math.PI*2); bc.clip();
+      bc.drawImage(img,aCX-aR,aCY-aR,aR*2,aR*2); bc.restore();
+    } else { drawAvatarFallback(bc,aCX,aCY,aR,data.username); }
+    bc.beginPath(); bc.arc(aCX,aCY,aR,0,Math.PI*2);
+    bc.strokeStyle=gr<=3?bHex:'rgba(255,255,255,0.1)'; bc.lineWidth=gr<=3?2:1; bc.stroke();
 
-    const midY = rowY + ROW_H / 2 + 5;
+    const mY = rowY+ROW_H/2+5;
+    bc.fillStyle=gr<=3?'#ffffff':'#c8d2ea'; bc.font=gr<=3?'bold 15px Arial':'14px Arial'; bc.textAlign='left';
+    bc.fillText(data.username.substring(0,22), C.player, mY);
+    bc.textAlign='center'; bc.fillStyle='#7986b0'; bc.font='13px Arial';
+    bc.fillText(data.wins+'/'+data.losses, C.wl, mY);
+    bc.fillText(data.mvps, C.mvp, mY);
 
-    // username
-    ctx.fillStyle = globalRank <= 3 ? '#ffffff' : '#c8d2ea';
-    ctx.font = globalRank <= 3 ? 'bold 15px Arial' : '14px Arial';
-    ctx.textAlign = 'left';
-    ctx.fillText(data.username.substring(0, 22), C.player, midY);
+    const pW=72, pH=28, pX=C.pts-pW/2, pY2=rowY+(ROW_H-pH)/2;
+    rrect(bc,pX,pY2,pW,pH,7); bc.fillStyle=gr<=3?bHex+'28':'rgba(88,101,242,0.15)'; bc.fill();
+    bc.fillStyle=gr<=3?bHex:'#7289da'; bc.font='bold 14px Arial'; bc.textAlign='center';
+    bc.fillText(String(data.pts), C.pts, pY2+pH/2+5);
 
-    // W/L
-    ctx.textAlign = 'center';
-    ctx.fillStyle = '#7986b0';
-    ctx.font = '13px Arial';
-    ctx.fillText(data.wins + '/' + data.losses, C.wl, midY);
-
-    // MVP
-    ctx.fillText(data.mvps, C.mvp, midY);
-
-    // points badge
-    const pText = String(data.pts);
-    const pW = 72, pH = 28;
-    const pX = C.pts - pW / 2, pY = rowY + (ROW_H - pH) / 2;
-    rrect(ctx, pX, pY, pW, pH, 7);
-    ctx.fillStyle = globalRank <= 3 ? badgeHex + '28' : 'rgba(88,101,242,0.15)';
-    ctx.fill();
-    if (globalRank <= 3) { ctx.shadowColor = badgeHex; ctx.shadowBlur = 6; }
-    ctx.fillStyle = globalRank <= 3 ? badgeHex : '#7289da';
-    ctx.font = 'bold 14px Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText(pText, C.pts, pY + pH / 2 + 5);
-    ctx.shadowBlur = 0;
-
-    // row separator
-    if (i < pageData.length - 1) {
-      ctx.fillStyle = 'rgba(255,255,255,0.04)';
-      ctx.fillRect(16, rowY + ROW_H - 1, W - 32, 1);
-    }
-    // podium divider after rank 3
-    if (globalRank === 3 && pageData.length > 3) {
-      ctx.fillStyle = 'rgba(88,101,242,0.3)';
-      ctx.fillRect(0, rowY + ROW_H - 1, W, 1);
-    }
+    if (i<pageData.length-1) { bc.fillStyle='rgba(255,255,255,0.04)'; bc.fillRect(16,rowY+ROW_H-1,W-32,1); }
+    if (gr===3&&pageData.length>3) { bc.fillStyle='rgba(88,101,242,0.3)'; bc.fillRect(0,rowY+ROW_H-1,W,1); }
   }
 
-  // footer
-  const fY = HDR_H + COL_H + pageData.length * ROW_H;
-  ctx.fillStyle = 'rgba(10,11,22,0.9)';
-  ctx.fillRect(0, fY, W, FOOT_H);
-  ctx.fillStyle = 'rgba(88,101,242,0.3)';
-  ctx.fillRect(0, fY, W, 1);
-  const now = new Date().toLocaleString('en-US', {
-    month: 'short', day: '2-digit', year: 'numeric',
-    hour: '2-digit', minute: '2-digit', hour12: false,
-  });
-  ctx.fillStyle = '#3a4460';
-  ctx.font = '11px Arial';
-  ctx.textAlign = 'center';
-  ctx.fillText('Last updated: ' + now + ' UTC  •  Use /rank to check your stats', W / 2, fY + FOOT_H / 2 + 4);
+  const fY = HDR_H+COL_H+pageData.length*ROW_H;
+  bc.fillStyle='rgba(10,11,22,0.9)'; bc.fillRect(0,fY,W,FOOT_H);
+  bc.fillStyle='rgba(88,101,242,0.3)'; bc.fillRect(0,fY,W,1);
+  const now = new Date().toLocaleString('en-US',{month:'short',day:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit',hour12:false});
+  bc.fillStyle='#3a4460'; bc.font='11px Arial'; bc.textAlign='center';
+  bc.fillText('Last updated: '+now+' UTC  •  Use /rank to check your stats', W/2, fY+FOOT_H/2+4);
 
-  return canvas.toBuffer('image/png');
+  // ── animated GIF ───────────────────────────────────────────
+  const NUM_FRAMES = 12;
+  const encoder = new GIFEncoder(W, H, 'neuquant', true);
+  encoder.setDelay(90); encoder.setRepeat(0); encoder.setQuality(12); encoder.start();
+
+  for (let f=0;f<NUM_FRAMES;f++) {
+    const fc  = createCanvas(W,H);
+    const ctx = fc.getContext('2d');
+    ctx.drawImage(base,0,0);
+
+    // shimmer sweep
+    const shimX = (f/NUM_FRAMES)*(W+500)-250;
+    const sg = ctx.createLinearGradient(shimX-120,0,shimX+120,0);
+    sg.addColorStop(0,'rgba(255,255,255,0)');
+    sg.addColorStop(0.4,'rgba(255,255,255,0.055)');
+    sg.addColorStop(0.5,'rgba(255,255,255,0.09)');
+    sg.addColorStop(0.6,'rgba(255,255,255,0.055)');
+    sg.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=sg; ctx.fillRect(0,0,W,H);
+
+    // accent-stripe shimmer
+    const asg = ctx.createLinearGradient(shimX-60,0,shimX+60,0);
+    asg.addColorStop(0,'rgba(255,255,255,0)');
+    asg.addColorStop(0.5,'rgba(255,255,255,0.45)');
+    asg.addColorStop(1,'rgba(255,255,255,0)');
+    ctx.fillStyle=asg; ctx.fillRect(0,0,W,4);
+
+    // pulsing glow on top-3 badges
+    const pulse = (Math.sin(f/NUM_FRAMES*Math.PI*2)+1)/2;
+    for (let i=0;i<Math.min(pageData.length,3);i++) {
+      const gr2 = globalStart+i+1; if (gr2>3) break;
+      const {badge:bHex2,text:tHex2} = rankStyle(gr2);
+      const [r,g,b] = hexRGB(bHex2);
+      const rowY2 = HDR_H+COL_H+i*ROW_H;
+      const alpha = 0.04+pulse*0.2;
+      const aura = ctx.createRadialGradient(C.rank,rowY2+ROW_H/2,4,C.rank,rowY2+ROW_H/2,70);
+      aura.addColorStop(0,'rgba('+r+','+g+','+b+','+alpha.toFixed(3)+')');
+      aura.addColorStop(1,'rgba('+r+','+g+','+b+',0)');
+      ctx.fillStyle=aura; ctx.fillRect(0,rowY2,W,ROW_H);
+
+      // redraw badge with dynamic glow
+      ctx.shadowColor=bHex2; ctx.shadowBlur=6+pulse*20;
+      const bX2=C.rank-bW/2, bY2=rowY2+(ROW_H-bH)/2;
+      rrect(ctx,bX2,bY2,bW,bH,7); ctx.fillStyle=bHex2; ctx.fill(); ctx.shadowBlur=0;
+      ctx.fillStyle=tHex2; ctx.font='bold 13px Arial'; ctx.textAlign='center';
+      ctx.fillText('#'+gr2, C.rank, bY2+bH/2+5);
+    }
+
+    encoder.addFrame(ctx);
+  }
+
+  encoder.finish();
+  return encoder.out.getData();
 }
 
 // ── CREATE STAT BAR ────────────────────────────────────────
@@ -472,7 +433,8 @@ const commands = [
     .setDescription('Check your rank and points'),
   new SlashCommandBuilder()
     .setName('resetvote')
-    .setDescription('Start a public vote to reset all player points (admin only)'),
+    .setDescription('Remove wrong points from a player, or start a full reset vote (admin only)')
+    .addUserOption(o => o.setName('player').setDescription('Player whose points to remove (leave empty for full reset vote)').setRequired(false))
 ].map(c => c.toJSON());
 
 // ── READY ──────────────────────────────────────────────────
@@ -643,7 +605,7 @@ client.on('interactionCreate', async (interaction) => {
 
         const { pageData, start } = getSlice(0);
         const buf = await generateLeaderboardImage(interaction.guild, pageData, 0, totalPages, totalPlayers, start);
-        const att = new AttachmentBuilder(buf, { name: 'leaderboard.png' });
+        const att = new AttachmentBuilder(buf, { name: 'leaderboard.gif' });
         const msg = await interaction.editReply({
           files: [att],
           components: totalPages > 1 ? [getButtons(0)] : [],
@@ -660,7 +622,7 @@ client.on('interactionCreate', async (interaction) => {
           await btn.deferUpdate();
           const { pageData: pd, start: s } = getSlice(currentPage);
           const newBuf = await generateLeaderboardImage(interaction.guild, pd, currentPage, totalPages, totalPlayers, s);
-          const newAtt = new AttachmentBuilder(newBuf, { name: 'leaderboard.png' });
+          const newAtt = new AttachmentBuilder(newBuf, { name: 'leaderboard.gif' });
           await btn.editReply({ files: [newAtt], components: [getButtons(currentPage)] });
         });
         collector.on('end', () => msg.edit({ components: [] }).catch(() => {}));
@@ -673,79 +635,101 @@ client.on('interactionCreate', async (interaction) => {
     // /resetvote (admin only)
     if (interaction.isChatInputCommand() && interaction.commandName === 'resetvote') {
       if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '❌ You do not have permission to start a reset vote!', ephemeral: true });
+        return interaction.reply({ content: '❌ You do not have permission to use this command!', ephemeral: true });
       }
 
-      const votes = { yes: new Set(), no: new Set() };
-      const DURATION = 60; // seconds
+      const targetUser = interaction.options.getUser('player');
 
-      const buildEmbed = (remaining) => new EmbedBuilder()
-        .setTitle('🗳️  POINTS RESET VOTE')
+      // ── MODE A: single player point removal ────────────────────────────────────
+      if (targetUser) {
+        const pts  = loadPoints();
+        const data = pts[targetUser.id];
+        if (!data || data.pts === 0) {
+          return interaction.reply({ content: '❌ **' + targetUser.username + '** has no points to remove.', ephemeral: true });
+        }
+        const confirmEmbed = new EmbedBuilder()
+          .setTitle('⚠️  Remove Player Points')
+          .setDescription(
+            'You are about to **wipe all stats** for <@' + targetUser.id + '>.' + '\n\n' +
+            '• Points: **' + data.pts + '**  |  Wins: **' + data.wins + '**  |  Losses: **' + data.losses + '**  |  MVPs: **' + data.mvps + '**' + '\n\n' +
+            'Confirm below — this cannot be undone.'
+          )
+          .setColor(0xfee75c)
+          .setFooter({ text: 'Confirmation expires in 30s' });
+        const confirmRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('rp_confirm_' + targetUser.id).setLabel('✅  Yes, remove').setStyle(ButtonStyle.Danger),
+          new ButtonBuilder().setCustomId('rp_cancel').setLabel('❌  Cancel').setStyle(ButtonStyle.Secondary)
+        );
+        await interaction.reply({ embeds: [confirmEmbed], components: [confirmRow], ephemeral: true });
+        const confirmMsg = await interaction.fetchReply();
+        const cc = confirmMsg.createMessageComponentCollector({ time: 30000, max: 1 });
+        cc.on('collect', async (btn) => {
+          if (btn.customId === 'rp_cancel') {
+            return btn.update({ embeds: [new EmbedBuilder().setDescription('❌ Cancelled.').setColor(0x5865f2)], components: [] });
+          }
+          const uid = btn.customId.replace('rp_confirm_', '');
+          const p = loadPoints();
+          const removed = p[uid] ? p[uid].pts : 0;
+          const uname   = p[uid] ? p[uid].username : targetUser.username;
+          if (p[uid]) { p[uid].pts=0; p[uid].wins=0; p[uid].losses=0; p[uid].mvps=0; p[uid].matches=0; }
+          savePoints(p);
+          if (interaction.guild) await updateNickname(interaction.guild, uid).catch(() => {});
+          const doneEmbed = new EmbedBuilder()
+            .setTitle('✅  Points Removed')
+            .setDescription('All **' + removed + ' points** have been wiped from **' + uname + '**.')
+            .setColor(0x57f287).setTimestamp();
+          await btn.update({ embeds: [doneEmbed], components: [] });
+        });
+        cc.on('end', (_,reason) => { if (reason==='time') interaction.editReply({ components:[] }).catch(()=>{}); });
+        return;
+      }
+
+      // ── MODE B: full-server reset vote ────────────────────────────────────────
+      const votes = { yes: new Set(), no: new Set() };
+      const DURATION = 60;
+      const buildEmbed = (rem) => new EmbedBuilder()
+        .setTitle('🗳️  Full Points Reset Vote')
         .setDescription(
-          '**An admin has called a vote to reset all player points.**\n\n' +
-          '✅  **Yes** — wipe all points and start fresh\n' +
-          '❌  **No**  — keep the current leaderboard\n\n' +
-          '```' +
-          '  YES  ' + votes.yes.size + '  |  NO  ' + votes.no.size +
-          '```'
+          '⚠️ **An admin has called a vote to reset ALL player points.**' + '\n\n' +
+          '✅  **Yes** — wipe all points and start fresh' + '\n' +
+          '❌  **No**  — keep the current leaderboard' + '\n\n' +
+          '```  YES  ' + votes.yes.size + '   |   NO  ' + votes.no.size + '```'
         )
         .setColor(0x5865F2)
-        .setFooter({ text: 'Vote closes in ' + remaining + 's  •  Each player votes once' });
-
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('rv_yes').setLabel('✅  YES — Reset').setStyle(ButtonStyle.Success),
+        .setFooter({ text: 'Vote closes in ' + rem + 's  •  Each player votes once' });
+      const vrow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rv_yes').setLabel('✅  YES — Reset All').setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId('rv_no').setLabel('❌  NO — Keep').setStyle(ButtonStyle.Danger)
       );
-
-      await interaction.reply({ embeds: [buildEmbed(DURATION)], components: [row] });
+      await interaction.reply({ embeds: [buildEmbed(DURATION)], components: [vrow] });
       const msg = await interaction.fetchReply();
-
       let remaining = DURATION;
       const ticker = setInterval(async () => {
         remaining -= 10;
-        if (remaining > 0) {
-          await msg.edit({ embeds: [buildEmbed(remaining)], components: [row] }).catch(() => {});
-        }
+        if (remaining > 0) await msg.edit({ embeds: [buildEmbed(remaining)], components: [vrow] }).catch(() => {});
       }, 10000);
-
       const collector = msg.createMessageComponentCollector({ time: DURATION * 1000 });
-
       collector.on('collect', async (btn) => {
         const uid = btn.user.id;
-        if (btn.customId === 'rv_yes') { votes.no.delete(uid); votes.yes.add(uid); }
-        else                           { votes.yes.delete(uid); votes.no.add(uid); }
-        await btn.reply({ content: btn.customId === 'rv_yes' ? '✅ Voted **YES**' : '❌ Voted **NO**', ephemeral: true });
-        await msg.edit({ embeds: [buildEmbed(remaining)], components: [row] }).catch(() => {});
+        if (btn.customId==='rv_yes') { votes.no.delete(uid); votes.yes.add(uid); }
+        else                         { votes.yes.delete(uid); votes.no.add(uid); }
+        await btn.reply({ content: btn.customId==='rv_yes' ? '✅ Voted **YES**' : '❌ Voted **NO**', ephemeral: true });
+        await msg.edit({ embeds: [buildEmbed(remaining)], components: [vrow] }).catch(() => {});
       });
-
       collector.on('end', async () => {
         clearInterval(ticker);
-        const yesCount = votes.yes.size;
-        const noCount  = votes.no.size;
-        const didReset = yesCount > noCount && yesCount >= 1;
-
-        if (didReset) {
+        const y=votes.yes.size, n=votes.no.size;
+        if (y>n && y>=1) {
           savePoints({});
-          const resultEmbed = new EmbedBuilder()
-            .setTitle('🔄  LEADERBOARD RESET')
-            .setDescription(
-              '**The vote passed — all points have been wiped!**\n\n' +
-              '```  YES  ' + yesCount + '  |  NO  ' + noCount + '```\n' +
-              'The leaderboard is now empty. Play matches to climb back up!'
-            )
-            .setColor(0xed4245)
-            .setTimestamp();
-          await msg.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+          await msg.edit({ embeds: [new EmbedBuilder()
+            .setTitle('🔄  Leaderboard Reset')
+            .setDescription('✅ **The vote passed — all points wiped!**' + '\n\n' + '```  YES  '+y+'  |  NO  '+n+'```' + '\n' + 'The leaderboard is now empty.')
+            .setColor(0xed4245).setTimestamp()], components: [] }).catch(() => {});
         } else {
-          const resultEmbed = new EmbedBuilder()
-            .setTitle('🛡️  RESET REJECTED')
-            .setDescription(
-              '**The vote failed — leaderboard stays as-is.**\n\n' +
-              '```  YES  ' + yesCount + '  |  NO  ' + noCount + '```'
-            )
-            .setColor(0x57f287)
-            .setTimestamp();
-          await msg.edit({ embeds: [resultEmbed], components: [] }).catch(() => {});
+          await msg.edit({ embeds: [new EmbedBuilder()
+            .setTitle('🛡️  Reset Rejected')
+            .setDescription('🛡️ **Vote failed — leaderboard stays as-is.**' + '\n\n' + '```  YES  '+y+'  |  NO  '+n+'```')
+            .setColor(0x57f287).setTimestamp()], components: [] }).catch(() => {});
         }
       });
       return;
