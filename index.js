@@ -342,22 +342,22 @@ async function generateLeaderboardImage(guild, pageData, pageIndex, totalPages, 
     const pText = String(data.pts);
     const pW2 = 74, pH2 = 26;
     const pX  = C.pts - pW2 / 2, pY2 = rowY + (ROW_H - pH2) / 2;
-    if (gr <= 3) {
-      ctx.shadowColor = pal.badge; ctx.shadowBlur = 6;
-    }
-    rrect(ctx, pX, pY2, pW2, pH2, 3);
-    ctx.fillStyle = gr === 1 ? 'rgba(255,215,0,0.2)'
-                  : gr === 2 ? 'rgba(200,200,200,0.12)'
-                  : gr === 3 ? 'rgba(205,127,50,0.2)'
-                  : gr <= 5  ? 'rgba(200,26,0,0.25)'
-                  :            'rgba(40,10,10,0.6)';
-    ctx.fill();
     ctx.shadowBlur = 0;
-    ctx.fillStyle = gr <= 3 ? pal.badge : (gr <= 5 ? '#ff4422' : '#553333');
+    rrect(ctx, pX, pY2, pW2, pH2, 3);
+    ctx.fillStyle = gr === 1 ? 'rgba(255,215,0,0.38)'
+                  : gr === 2 ? 'rgba(200,200,200,0.30)'
+                  : gr === 3 ? 'rgba(205,127,50,0.38)'
+                  : gr <= 5  ? 'rgba(200,26,0,0.30)'
+                  :            'rgba(40,10,10,0.65)';
+    ctx.fill();
+    if (gr <= 3) {
+      rrect(ctx, pX, pY2, pW2, pH2, 3);
+      ctx.strokeStyle = pal.badge; ctx.lineWidth = 1; ctx.stroke();
+    }
+    ctx.fillStyle = gr <= 5 ? '#ffffff' : '#664444';
     ctx.font = 'bold 13px Arial';
     ctx.textAlign = 'center';
     ctx.fillText(pText, C.pts, pY2 + pH2 / 2 + 5);
-
     // row separator
     if (i < pageData.length - 1) {
       ctx.fillStyle = 'rgba(100,0,0,0.3)';
@@ -512,7 +512,10 @@ const commands = [
   new SlashCommandBuilder()
     .setName('resetvote')
     .setDescription('Remove wrong points from a player, or start a full reset vote (admin only)')
-    .addUserOption(o => o.setName('player').setDescription('Player whose points to remove (leave empty for full reset vote)').setRequired(false))
+    .addUserOption(o => o.setName('player').setDescription('Player whose points to remove (leave empty for full reset vote)').setRequired(false)),
+  new SlashCommandBuilder()
+    .setName('resetseason')
+    .setDescription('Wipe all player points for a fresh season start (admin only)')
 ].map(c => c.toJSON());
 
 // ── READY ──────────────────────────────────────────────────
@@ -661,7 +664,7 @@ client.on('interactionCreate', async (interaction) => {
         const pts = loadPoints();
         const sorted = Object.entries(pts)
           .filter(([, v]) => v.pts > 0)
-          .sort((a, b) => b[1].pts - a[1].pts);
+          .sort((a, b) => b[1].pts - a[1].pts).slice(0, 50);
 
         const ITEMS        = 10;
         const totalPlayers = sorted.length;
@@ -708,6 +711,56 @@ client.on('interactionCreate', async (interaction) => {
         console.error('❌ Leaderboard error:', err);
         return interaction.editReply({ content: '❌ Failed to generate leaderboard image.' });
       }
+    }
+
+    // /resetseason (admin only)
+    if (interaction.isChatInputCommand() && interaction.commandName === 'resetseason') {
+      if (!isAdmin(interaction.member)) {
+        return interaction.reply({ content: '❌ You do not have permission to use this command!', ephemeral: true });
+      }
+      const allPts = loadPoints();
+      const playerCount = Object.keys(allPts).length;
+
+      const confirmEmbed = new EmbedBuilder()
+        .setTitle('⚠️  SEASON RESET')
+        .setDescription(
+          '**This will permanently wipe points for ALL ' + playerCount + ' players.**' + '\n\n' +
+          'Use this to start a fresh competitive season.' + '\n' +
+          'This action **cannot** be undone.' + '\n\n' +
+          'Are you sure?'
+        )
+        .setColor(0xff1a00)
+        .setFooter({ text: 'Confirmation expires in 30s' });
+
+      const rsRow = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId('rs_confirm').setLabel('🔥  Yes, wipe everything').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('rs_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+      );
+
+      await interaction.reply({ embeds: [confirmEmbed], components: [rsRow], ephemeral: true });
+      const rsMsg = await interaction.fetchReply();
+      const rsCC  = rsMsg.createMessageComponentCollector({ time: 30000, max: 1 });
+
+      rsCC.on('collect', async (btn) => {
+        if (btn.customId === 'rs_cancel') {
+          return btn.update({ embeds: [new EmbedBuilder().setDescription('Cancelled.').setColor(0x333333)], components: [] });
+        }
+        savePoints({});
+        const doneEmbed = new EmbedBuilder()
+          .setTitle('🔄  Season Reset Complete')
+          .setDescription(
+            'All **' + playerCount + '** players\' points have been wiped.' + '\n' +
+            'The leaderboard is now empty — Season ' + new Date().getFullYear() + ' begins!'
+          )
+          .setColor(0xff1a00)
+          .setTimestamp();
+        await btn.update({ embeds: [doneEmbed], components: [] });
+      });
+
+      rsCC.on('end', (_, reason) => {
+        if (reason === 'time') interaction.editReply({ components: [] }).catch(() => {});
+      });
+      return;
     }
 
     // /resetvote (admin only)
