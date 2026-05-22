@@ -12,6 +12,7 @@ const {
   TextInputBuilder,
   TextInputStyle,
   PermissionsBitField,
+  MessageFlags,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -716,7 +717,7 @@ client.on('interactionCreate', async (interaction) => {
     // /resetseason (admin only)
     if (interaction.isChatInputCommand() && interaction.commandName === 'resetseason') {
       if (!isAdmin(interaction.member)) {
-        return interaction.reply({ content: '❌ You do not have permission to use this command!', ephemeral: true });
+        return interaction.reply({ content: '❌ You do not have permission to use this command!', flags: MessageFlags.Ephemeral });
       }
       const allPts = loadPoints();
       const playerCount = Object.keys(allPts).length;
@@ -724,9 +725,9 @@ client.on('interactionCreate', async (interaction) => {
       const confirmEmbed = new EmbedBuilder()
         .setTitle('⚠️  SEASON RESET')
         .setDescription(
-          '**This will permanently wipe points for ALL ' + playerCount + ' players.**' + '\n\n' +
-          'Use this to start a fresh competitive season.' + '\n' +
-          'This action **cannot** be undone.' + '\n\n' +
+          '**This will permanently wipe points for ALL ' + playerCount + ' players.**\n\n' +
+          'Use this to start a fresh competitive season.\n' +
+          'This action **cannot** be undone.\n\n' +
           'Are you sure?'
         )
         .setColor(0xff1a00)
@@ -737,29 +738,33 @@ client.on('interactionCreate', async (interaction) => {
         new ButtonBuilder().setCustomId('rs_cancel').setLabel('Cancel').setStyle(ButtonStyle.Secondary)
       );
 
-      await interaction.reply({ embeds: [confirmEmbed], components: [rsRow], ephemeral: true });
-      const rsMsg = await interaction.fetchReply();
-      const rsCC  = rsMsg.createMessageComponentCollector({ time: 30000, max: 1 });
+      await interaction.reply({ embeds: [confirmEmbed], components: [rsRow], flags: MessageFlags.Ephemeral });
 
-      rsCC.on('collect', async (btn) => {
-        if (btn.customId === 'rs_cancel') {
-          return btn.update({ embeds: [new EmbedBuilder().setDescription('Cancelled.').setColor(0x333333)], components: [] });
-        }
-        savePoints({});
-        const doneEmbed = new EmbedBuilder()
-          .setTitle('🔄  Season Reset Complete')
-          .setDescription(
-            'All **' + playerCount + '** players\' points have been wiped.' + '\n' +
-            'The leaderboard is now empty — Season ' + new Date().getFullYear() + ' begins!'
-          )
-          .setColor(0xff1a00)
-          .setTimestamp();
-        await btn.update({ embeds: [doneEmbed], components: [] });
-      });
+      let btn;
+      try {
+        btn = await interaction.awaitMessageComponent({ time: 30_000 });
+      } catch {
+        // timed out — disable buttons
+        await interaction.editReply({ components: [] }).catch(() => {});
+        return;
+      }
 
-      rsCC.on('end', (_, reason) => {
-        if (reason === 'time') interaction.editReply({ components: [] }).catch(() => {});
-      });
+      if (btn.customId === 'rs_cancel') {
+        await btn.update({ embeds: [new EmbedBuilder().setDescription('Cancelled.').setColor(0x333333)], components: [] });
+        return;
+      }
+
+      // rs_confirm
+      savePoints({});
+      const doneEmbed = new EmbedBuilder()
+        .setTitle('🔄  Season Reset Complete')
+        .setDescription(
+          'All **' + playerCount + "** players' points have been wiped.\n" +
+          'The leaderboard is now empty — Season ' + new Date().getFullYear() + ' begins!'
+        )
+        .setColor(0xff1a00)
+        .setTimestamp();
+      await btn.update({ embeds: [doneEmbed], components: [] });
       return;
     }
 
